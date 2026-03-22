@@ -11,6 +11,7 @@ char *sanitise_final(const char *s);
 char *sanitise(const char *s);
 char *escape_for_shell(const char *s);
 char *replace_substring(const char *str, const char *old, const char *new_sub);
+char *sanitise_dirname(const char *original);
 
 #ifndef TESTING
 static void print_usage(FILE *stream, const char *prog_name);

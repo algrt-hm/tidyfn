@@ -1,5 +1,6 @@
 #include <ctype.h>   // ctype.h for character type functions (isupper, isdigit, tolower, isascii)
 #include <dirent.h>  // dirent.h for reading directory
+#include <limits.h>  // PATH_MAX
 #include <stdbool.h> // stdbool.h for the bool type
 #include <stdio.h>   // stdio.h for input/output (printf)
 #include <stdlib.h>  // stdlib.h for memory allocation (malloc, free)
@@ -126,7 +127,7 @@ char *sanitise_core(const char *s) {
   int k = 0;
   for (size_t i = 0; i < len; i++) {
     char c = s[i];
-    if (isdigit(c) || (is_ascii(&c) && isalpha((unsigned char)c)) || strchr(KEY_NON_ALPHANUMERIC, c)) {
+    if (isdigit(c) || ((unsigned char)c < 128 && isalpha((unsigned char)c)) || strchr(KEY_NON_ALPHANUMERIC, c)) {
       temp[k++] = c;
     }
   }
@@ -279,6 +280,68 @@ char *replace_substring(const char *str, const char *old, const char *new_sub) {
   return result;
 }
 
+/**
+ * @brief Sanitise a directory name: run sanitise(), replace dots with
+ * underscores, and re-insert any parentheses from the original name.
+ * @return A new dynamically allocated string. Caller must free.
+ */
+char *sanitise_dirname(const char *original) {
+  // Strip parens from the original before sanitising
+  size_t len = strlen(original);
+  char *no_parens = malloc(len + 1);
+  if (!no_parens)
+    return strdup(original);
+  size_t j = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (original[i] != '(' && original[i] != ')')
+      no_parens[j++] = original[i];
+  }
+  no_parens[j] = '\0';
+
+  char *sanitised = sanitise(no_parens);
+  free(no_parens);
+
+  // Directories don't have file extensions, so replace all dots with underscores
+  for (char *p = sanitised; *p; p++) {
+    if (*p == '.')
+      *p = '_';
+  }
+
+  // Re-insert parens at their original relative positions.
+  // sanitise only removes/transforms characters, never reorders, so we can
+  // walk both strings in order: emit parens from the original, and advance
+  // through the sanitised output for everything else.
+  size_t san_len = strlen(sanitised);
+  size_t paren_count = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (original[i] == '(' || original[i] == ')')
+      paren_count++;
+  }
+  char *result = malloc(san_len + paren_count + 1);
+  if (!result) {
+    free(sanitised);
+    return strdup(original);
+  }
+
+  size_t si = 0; // index into sanitised
+  size_t ri = 0; // index into result
+  for (size_t oi = 0; oi < len; oi++) {
+    if (original[oi] == '(' || original[oi] == ')') {
+      result[ri++] = original[oi];
+    } else if (si < san_len) {
+      result[ri++] = sanitised[si++];
+    }
+  }
+  // Emit any remaining sanitised chars
+  while (si < san_len) {
+    result[ri++] = sanitised[si++];
+  }
+  result[ri] = '\0';
+
+  free(sanitised);
+  return result;
+}
+
 #ifndef TESTING
 
 /**
@@ -286,12 +349,13 @@ char *replace_substring(const char *str, const char *old, const char *new_sub) {
  */
 static void print_usage(FILE *stream, const char *prog_name) {
   const char *usage =
-      "Usage: %s\n"
+      "Usage: %s [-r]\n"
       "\n"
       "Scans the current directory for regular files and prints safe rename commands. It does not modify "
       "files itself; it only prints shell 'mv' commands that you can review and run.\n"
       "\n"
-      "Note: No arguments are required/accepted; it always operates on the current directory.\n"
+      "Options:\n"
+      "  -r    Recurse into subdirectories\n"
       "\n"
       "Output format:\n"
       "  mv <original file name> <sanitised file name>\n"
@@ -311,73 +375,124 @@ static void print_usage(FILE *stream, const char *prog_name) {
 }
 
 /**
- * @brief Main function to find files and generate rename commands.
+ * @brief Scan a directory for files to rename.
+ * If recursive is true, descend into subdirectories.
+ * prefix is prepended to filenames in the output (e.g. "subdir/").
  */
-int main(int argc, char *argv[]) {
-  if (argc != 1) {
-    print_usage(stderr, argv[0]);
-    return 2;
+static void scan_directory(const char *path, bool recursive, const char *prefix, int *looked_at, int *renamable,
+                           int *dirs_renamable) {
+  DIR *d = opendir(path);
+  if (d == NULL) {
+    fprintf(stderr, "Could not open directory: %s\n", path);
+    return;
   }
 
-  DIR *d;
   struct dirent *dir;
-  d = opendir(".");
-  int looked_at = 0;
-  int renamable = 0;
-
-  if (d == NULL) {
-    perror("Could not open current directory");
-    return 1;
-  } // impliedly we're good
-
   while ((dir = readdir(d)) != NULL) {
-    const char *old_name = dir->d_name;
+    const char *entry_name = dir->d_name;
 
     // Skip hidden files, "." and ".."
-    if (old_name[0] == '.' || strcmp(old_name, ".") == 0 || strcmp(old_name, "..") == 0) {
+    if (entry_name[0] == '.') {
       continue;
     }
 
-    // Check if it's a regular file (not a directory)
+    // Build the full path for stat
+    char full_path[PATH_MAX];
+    snprintf(full_path, sizeof(full_path), "%s/%s", path, entry_name);
+
+    // Use lstat to avoid following symlinks
     struct stat path_stat;
-    stat(old_name, &path_stat);
+    if (lstat(full_path, &path_stat) != 0) {
+      continue;
+    }
+
+    if (S_ISDIR(path_stat.st_mode)) {
+      if (recursive) {
+        // Build the new prefix using the original directory name
+        char new_prefix[PATH_MAX];
+        snprintf(new_prefix, sizeof(new_prefix), "%s%s/", prefix, entry_name);
+        scan_directory(full_path, recursive, new_prefix, looked_at, renamable, dirs_renamable);
+
+        // After processing contents, rename the directory itself if needed
+        char *new_dir_name = sanitise_dirname(entry_name);
+        if (strcmp(entry_name, new_dir_name) != 0) {
+          char old_prefixed[PATH_MAX];
+          char new_prefixed[PATH_MAX];
+          snprintf(old_prefixed, sizeof(old_prefixed), "%s%s", prefix, entry_name);
+          snprintf(new_prefixed, sizeof(new_prefixed), "%s%s", prefix, new_dir_name);
+
+          char *old_escaped = escape_for_shell(old_prefixed);
+          char *new_escaped = escape_for_shell(new_prefixed);
+          printf("mv \"%s\" \"%s\"\n", old_escaped, new_escaped);
+          free(old_escaped);
+          free(new_escaped);
+          (*dirs_renamable)++;
+        }
+        free(new_dir_name);
+      }
+      continue;
+    }
+
     if (!S_ISREG(path_stat.st_mode)) {
       continue;
     }
 
-    // Get the name once it's been sanitised
-    char *new_name = sanitise(old_name);
+    // Sanitise only the basename
+    char *new_name = sanitise(entry_name);
 
-    // If the sanitised and the original are different
-    // i.e. it does actually want sanitising
-    // then we print our mv command which can be copied and
-    // pasted to effect the change
-    if (strcmp(old_name, new_name) != 0) {
-      char *old_escaped = escape_for_shell(old_name);
-      printf("mv \"%s\" \"%s\"\n", old_escaped, new_name);
+    if (strcmp(entry_name, new_name) != 0) {
+      // Build prefixed old and new names for the mv command
+      char old_prefixed[PATH_MAX];
+      char new_prefixed[PATH_MAX];
+      snprintf(old_prefixed, sizeof(old_prefixed), "%s%s", prefix, entry_name);
+      snprintf(new_prefixed, sizeof(new_prefixed), "%s%s", prefix, new_name);
+
+      char *old_escaped = escape_for_shell(old_prefixed);
+      char *new_escaped = escape_for_shell(new_prefixed);
+      printf("mv \"%s\" \"%s\"\n", old_escaped, new_escaped);
       free(old_escaped);
-      renamable++;
+      free(new_escaped);
+      (*renamable)++;
     }
 
     free(new_name);
-    looked_at++;
+    (*looked_at)++;
   }
 
-  // Close the directory
   closedir(d);
+}
 
-  // If no regular files
-  if (!looked_at) {
-    fprintf(stderr, "There seem to be no regular files in the working directory\n");
+/**
+ * @brief Main function to find files and generate rename commands.
+ */
+int main(int argc, char *argv[]) {
+  bool recursive = false;
+
+  if (argc == 2 && strcmp(argv[1], "-r") == 0) {
+    recursive = true;
+  } else if (argc != 1) {
+    print_usage(stderr, argv[0]);
+    return 2;
+  }
+
+  int looked_at = 0;
+  int renamable = 0;
+  int dirs_renamable = 0;
+
+  scan_directory(".", recursive, "", &looked_at, &renamable, &dirs_renamable);
+
+  // If no regular files and no directory renames were printed
+  if (!looked_at && !dirs_renamable) {
+    fprintf(stderr, "There seem to be no regular files in the working directory%s\n",
+            recursive ? "" : " (use -r to recurse into subdirectories)");
     return 0;
   }
 
   // If regular files but no candidates for renaming
-  if (!renamable) {
+  if (looked_at && !renamable && !dirs_renamable) {
     char *working_dir = getcwd(NULL, 0);
-    fprintf(stderr,
-            "All of the %d regular files in the current working directory %s seem to have sensible names already\n",
-            looked_at, working_dir);
+    fprintf(stderr, "All %d regular files %s%s seem to have sensible names already\n", looked_at,
+            recursive ? "under " : "in ", working_dir);
     free(working_dir);
   }
 

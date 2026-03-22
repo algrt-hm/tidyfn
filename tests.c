@@ -101,7 +101,46 @@ bool test_sanitise_core() {
 }
 
 // sanitise
-bool test_sanitise() { return true; }
+bool test_sanitise() {
+  CHECK_STR(sanitise("Hello World.txt"), "Hello_World.txt");
+  CHECK_STR(sanitise("ALL CAPS FILE.PDF"), "all_caps_file.pdf");
+  CHECK_STR(sanitise("lots.of.dots.ext"), "lots_of_dots.ext");
+  CHECK_STR(sanitise("clean.txt"), "clean.txt");
+
+  return (!strcmp(sanitise("Hello World.txt"), "Hello_World.txt") &&
+          !strcmp(sanitise("ALL CAPS FILE.PDF"), "all_caps_file.pdf") &&
+          !strcmp(sanitise("lots.of.dots.ext"), "lots_of_dots.ext") && !strcmp(sanitise("clean.txt"), "clean.txt"));
+}
+
+// sanitise_dirname
+bool test_sanitise_dirname() {
+  // Basic sanitisation (spaces to underscores, lowercase)
+  CHECK_STR(sanitise_dirname("Bad Dir Name"), "Bad_Dir_Name");
+  CHECK_STR(sanitise_dirname("LOUD DIR"), "loud_dir");
+
+  // Dots replaced with underscores (no file extension for dirs)
+  CHECK_STR(sanitise_dirname("some.dir.name"), "some_dir_name");
+
+  // Parens preserved
+  CHECK_STR(sanitise_dirname("Stanford (2025)"), "Stanford_(2025)");
+  CHECK_STR(sanitise_dirname("foo(bar)"), "foo(bar)");
+  CHECK_STR(sanitise_dirname("(leading)"), "(leading)");
+
+  // No placeholder collision: literal qlpq/qrpq pass through unchanged
+  CHECK_STR(sanitise_dirname("qlpq"), "qlpq");
+  CHECK_STR(sanitise_dirname("qrpq"), "qrpq");
+
+  // Already clean dir name
+  CHECK_STR(sanitise_dirname("clean_dir"), "clean_dir");
+
+  return (!strcmp(sanitise_dirname("Bad Dir Name"), "Bad_Dir_Name") &&
+          !strcmp(sanitise_dirname("LOUD DIR"), "loud_dir") &&
+          !strcmp(sanitise_dirname("some.dir.name"), "some_dir_name") &&
+          !strcmp(sanitise_dirname("Stanford (2025)"), "Stanford_(2025)") &&
+          !strcmp(sanitise_dirname("foo(bar)"), "foo(bar)") && !strcmp(sanitise_dirname("(leading)"), "(leading)") &&
+          !strcmp(sanitise_dirname("qlpq"), "qlpq") && !strcmp(sanitise_dirname("qrpq"), "qrpq") &&
+          !strcmp(sanitise_dirname("clean_dir"), "clean_dir"));
+}
 
 // escape_for_shell
 bool test_escape_for_shell() {
@@ -164,7 +203,8 @@ bool test_replace_substring() {
 int main() {
   bool tests_all_pass =
       (test_is_ascii() && test_proportion_block_caps() && test_handle_last_dot() && test_remove_all_but_last_dot() &&
-       test_sanitise_core() && test_sanitise() && test_escape_for_shell() && test_replace_substring());
+       test_sanitise_core() && test_sanitise() && test_sanitise_dirname() && test_escape_for_shell() &&
+       test_replace_substring());
 
   if (tests_all_pass) {
     puts("Passed tests");

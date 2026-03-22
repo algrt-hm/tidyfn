@@ -23,8 +23,9 @@ format:
 install: $(TARGET)
 	cp ./$(TARGET) "$(HOME)/bin/$(TARGET)"
 
-run-tests: $(TEST_TARGET)
+run-tests: $(TEST_TARGET) $(TARGET)
 	./$(TEST_TARGET)
+	./test_recursive.sh
 
 # Test it
 $(TEST_TARGET): $(TEST_TARGET).c $(TARGET).c $(TARGET).h
