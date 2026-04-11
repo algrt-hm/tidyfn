@@ -7,7 +7,6 @@ float proportion_block_caps(const char *s);
 char *handle_before_dot(const char *s);
 char *remove_all_but_last_dot(const char *s);
 char *sanitise_core(const char *s);
-char *sanitise_final(const char *s);
 char *sanitise(const char *s);
 char *escape_for_shell(const char *s);
 char *replace_substring(const char *str, const char *old, const char *new_sub);

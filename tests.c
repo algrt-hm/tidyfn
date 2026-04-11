@@ -3,29 +3,37 @@
 
 #include "tidyfn.h"
 
-// Simple expectation helper: compares two values and prints both if unequal.
-// Usage: e.g. CHECK(expected_value, actual_value, "%d")
+// Test infrastructure: each CHECK_STR_FN call evaluates the function once,
+// checks against expected, prints on mismatch, frees the result, and
+// sets `pass = false` on failure.
 
-#define CHECK(actual_value, expected_value, fmt)                                                                       \
+static int check_count = 0;
+static int fail_count = 0;
+
+#define CHECK(actual_value, expected_value, fmt)                                                                        \
   do {                                                                                                                 \
+    check_count++;                                                                                                     \
     if ((expected_value) != (actual_value)) {                                                                          \
       fprintf(stderr, "[CHECK] %s:%d expected: " fmt "  actual: " fmt "\n", __FILE__, __LINE__, (expected_value),      \
               (actual_value));                                                                                         \
+      pass = false;                                                                                                    \
     }                                                                                                                  \
-  } while (0);
+  } while (0)
 
-// Note: For strings, compare with strcmp and print with "%s" explicitly.
-#define CHECK_STR(actual_value, expected_value)                                                                        \
+#define CHECK_STR_FN(fn_call, expected)                                                                                \
   do {                                                                                                                 \
-    if (strcmp(expected_value, actual_value)) {                                                                        \
-      fprintf(stderr, "[CHECK] %s:%d expected: '%s' actual: '%s' \n", __FILE__, __LINE__, (expected_value),            \
-              (actual_value));                                                                                         \
+    check_count++;                                                                                                     \
+    char *_res = (fn_call);                                                                                            \
+    if (strcmp((expected), _res) != 0) {                                                                               \
+      fprintf(stderr, "[CHECK] %s:%d expected: '%s'  actual: '%s'\n", __FILE__, __LINE__, (expected), _res);           \
+      pass = false;                                                                                                    \
     }                                                                                                                  \
-  } while (0);
+    free(_res);                                                                                                        \
+  } while (0)
 
 bool test_is_ascii() {
+  bool pass = true;
   char *not_ascii = (char *)calloc(2, sizeof(char));
-
   not_ascii[0] = (char)130;
   not_ascii[1] = '\0';
 
@@ -33,171 +41,121 @@ bool test_is_ascii() {
   CHECK(is_ascii("z"), true, "%d");
   CHECK(is_ascii("1"), true, "%d");
   CHECK(is_ascii("11"), true, "%d");
-  CHECK(is_ascii("11"), true, "%d");
   CHECK(is_ascii(not_ascii), false, "%d");
 
-  return ((is_ascii("a") == true) && (is_ascii("z") == true) && (is_ascii("1") == true) && (is_ascii("11") == true) &&
-          (is_ascii(not_ascii) == false));
+  free(not_ascii);
+  return pass;
 }
 
 bool test_proportion_block_caps() {
+  bool pass = true;
   CHECK(proportion_block_caps("ARGHH"), 1.0f, "%f");
   CHECK(proportion_block_caps("arghh"), 0.0f, "%f");
   CHECK(proportion_block_caps("arGH"), 0.5f, "%f");
-
-  return ((proportion_block_caps("ARGHH") == 1.0f) && (proportion_block_caps("arghh") == 0.0f) &&
-          (proportion_block_caps("arGH") == 0.5f));
+  return pass;
 }
 
 bool test_handle_last_dot() {
-  CHECK_STR(handle_before_dot(".."), ".");
-  CHECK_STR(handle_before_dot("_."), ".");
-  CHECK_STR(handle_before_dot(" ."), ".");
-  CHECK_STR(handle_before_dot("_."), ".");
-  CHECK_STR(handle_before_dot("x."), "x.");
-
-  return (!strcmp(handle_before_dot(".."), ".") && !strcmp(handle_before_dot("_."), ".") &&
-          !strcmp(handle_before_dot(" ."), ".") && !strcmp(handle_before_dot("_."), ".") &&
-          !strcmp(handle_before_dot("x."), "x."));
+  bool pass = true;
+  CHECK_STR_FN(handle_before_dot(".."), ".");
+  CHECK_STR_FN(handle_before_dot("_."), ".");
+  CHECK_STR_FN(handle_before_dot(" ."), ".");
+  CHECK_STR_FN(handle_before_dot("x."), "x.");
+  return pass;
 }
 
-// remove_all_but_last_dot
 bool test_remove_all_but_last_dot() {
-  CHECK_STR(remove_all_but_last_dot("bob.tar.gz"), "bob.tar.gz");
-  CHECK_STR(remove_all_but_last_dot("bill.tar.bz"), "bill.tar.bz");
-  CHECK_STR(remove_all_but_last_dot("lots.of.dots.ext"), "lots_of_dots.ext");
-
-  return (!strcmp(remove_all_but_last_dot("bob.tar.gz"), "bob.tar.gz") &&
-          !strcmp(remove_all_but_last_dot("bill.tar.bz"), "bill.tar.bz") &&
-          !strcmp(remove_all_but_last_dot("lots.of.dots.ext"), "lots_of_dots.ext"));
+  bool pass = true;
+  CHECK_STR_FN(remove_all_but_last_dot("bob.tar.gz"), "bob.tar.gz");
+  CHECK_STR_FN(remove_all_but_last_dot("bill.tar.bz"), "bill.tar.bz");
+  CHECK_STR_FN(remove_all_but_last_dot("lots.of.dots.ext"), "lots_of_dots.ext");
+  return pass;
 }
 
-// sanitise_core
 bool test_sanitise_core() {
-  // Might consider below case:
-  // CHECK_STR(sanitise_core("__file_name__.ext"), "file_name.ext");
-
+  bool pass = true;
   // 1. Keep only alphanumeric, ASCII letters, and KEY_NON_ALPHANUMERIC chars
-  CHECK_STR(sanitise_core("src.🔥"), "src");
+  CHECK_STR_FN(sanitise_core("src.🔥"), "src");
   // 2. Convert to lowercase if mostly caps (except README.md)
-  CHECK_STR(sanitise_core("ALL_CAPS.md"), "all_caps.md");
-  CHECK_STR(sanitise_core("README.md"), "README.md");
+  CHECK_STR_FN(sanitise_core("ALL_CAPS.md"), "all_caps.md");
+  CHECK_STR_FN(sanitise_core("README.md"), "README.md");
   // 3. Replace spaces with underscores
-  CHECK_STR(sanitise_core("file name.ext"), "file_name.ext");
-  CHECK_STR(sanitise_core("README.md"), "README.md");
-  // 4. Remove double special characters
-  CHECK_STR(sanitise_core("file__name.ext"), "file_name.ext");
+  CHECK_STR_FN(sanitise_core("file name.ext"), "file_name.ext");
+  // 4. Remove double special characters (but protect extension dot)
+  CHECK_STR_FN(sanitise_core("file__name.ext"), "file_name.ext");
+  CHECK_STR_FN(sanitise_core("item_.png"), "item_.png");
   // 5. Trim leading/trailing special characters
-  CHECK_STR(sanitise_core("__file_name.ext__"), "file_name.ext");
-  // 6. Get rid of "_-_" -> "-"
-  CHECK_STR(sanitise_core("file_-_name.ext"), "file_name.ext");
-
-  return (
-      !strcmp(sanitise_core("src.🔥"), "src") && !strcmp(sanitise_core("ALL_CAPS.md"), "all_caps.md") &&
-      !strcmp(sanitise_core("README.md"), "README.md") && !strcmp(sanitise_core("file name.ext"), "file_name.ext") &&
-      !strcmp(sanitise_core("README.md"), "README.md") && !strcmp(sanitise_core("file__name.ext"), "file_name.ext") &&
-      !strcmp(sanitise_core("__file_name.ext__"), "file_name.ext") &&
-      !strcmp(sanitise_core("file_-_name.ext"), "file_name.ext"));
+  CHECK_STR_FN(sanitise_core("__file_name.ext__"), "file_name.ext");
+  // Consecutive specials collapsed, _-_ becomes _
+  CHECK_STR_FN(sanitise_core("file_-_name.ext"), "file_name.ext");
+  return pass;
 }
 
-// sanitise
 bool test_sanitise() {
-  CHECK_STR(sanitise("Hello World.txt"), "Hello_World.txt");
-  CHECK_STR(sanitise("ALL CAPS FILE.PDF"), "all_caps_file.pdf");
-  CHECK_STR(sanitise("lots.of.dots.ext"), "lots_of_dots.ext");
-  CHECK_STR(sanitise("clean.txt"), "clean.txt");
-
-  return (!strcmp(sanitise("Hello World.txt"), "Hello_World.txt") &&
-          !strcmp(sanitise("ALL CAPS FILE.PDF"), "all_caps_file.pdf") &&
-          !strcmp(sanitise("lots.of.dots.ext"), "lots_of_dots.ext") && !strcmp(sanitise("clean.txt"), "clean.txt"));
+  bool pass = true;
+  CHECK_STR_FN(sanitise("Hello World.txt"), "Hello_World.txt");
+  CHECK_STR_FN(sanitise("ALL CAPS FILE.PDF"), "all_caps_file.pdf");
+  CHECK_STR_FN(sanitise("lots.of.dots.ext"), "lots_of_dots.ext");
+  CHECK_STR_FN(sanitise("clean.txt"), "clean.txt");
+  // @ replaced with 'at', & replaced with 'and'
+  CHECK_STR_FN(sanitise("spritesheet@2.png"), "spritesheetat2.png");
+  CHECK_STR_FN(sanitise("Dice & Cards.txt"), "Dice_and_Cards.txt");
+  CHECK_STR_FN(sanitise("keyboard-&-mouse.png"), "keyboard-and-mouse.png");
+  // Extension preserved when special char precedes the dot
+  CHECK_STR_FN(sanitise("item_.png"), "item.png");
+  CHECK_STR_FN(sanitise("emote__.png"), "emote.png");
+  CHECK_STR_FN(sanitise("name-.ext"), "name.ext");
+  CHECK_STR_FN(sanitise("name .ext"), "name.ext");
+  // tar.gz extension preserved
+  CHECK_STR_FN(sanitise("archive.tar.gz"), "archive.tar.gz");
+  CHECK_STR_FN(sanitise("my.archive.tar.gz"), "my_archive.tar.gz");
+  return pass;
 }
 
-// sanitise_dirname
 bool test_sanitise_dirname() {
-  // Basic sanitisation (spaces to underscores, lowercase)
-  CHECK_STR(sanitise_dirname("Bad Dir Name"), "Bad_Dir_Name");
-  CHECK_STR(sanitise_dirname("LOUD DIR"), "loud_dir");
-
-  // Dots replaced with underscores (no file extension for dirs)
-  CHECK_STR(sanitise_dirname("some.dir.name"), "some_dir_name");
-
-  // Parens preserved
-  CHECK_STR(sanitise_dirname("Stanford (2025)"), "Stanford_(2025)");
-  CHECK_STR(sanitise_dirname("foo(bar)"), "foo(bar)");
-  CHECK_STR(sanitise_dirname("(leading)"), "(leading)");
-
-  // No placeholder collision: literal qlpq/qrpq pass through unchanged
-  CHECK_STR(sanitise_dirname("qlpq"), "qlpq");
-  CHECK_STR(sanitise_dirname("qrpq"), "qrpq");
-
-  // Already clean dir name
-  CHECK_STR(sanitise_dirname("clean_dir"), "clean_dir");
-
-  return (!strcmp(sanitise_dirname("Bad Dir Name"), "Bad_Dir_Name") &&
-          !strcmp(sanitise_dirname("LOUD DIR"), "loud_dir") &&
-          !strcmp(sanitise_dirname("some.dir.name"), "some_dir_name") &&
-          !strcmp(sanitise_dirname("Stanford (2025)"), "Stanford_(2025)") &&
-          !strcmp(sanitise_dirname("foo(bar)"), "foo(bar)") && !strcmp(sanitise_dirname("(leading)"), "(leading)") &&
-          !strcmp(sanitise_dirname("qlpq"), "qlpq") && !strcmp(sanitise_dirname("qrpq"), "qrpq") &&
-          !strcmp(sanitise_dirname("clean_dir"), "clean_dir"));
+  bool pass = true;
+  CHECK_STR_FN(sanitise_dirname("Bad Dir Name"), "Bad_Dir_Name");
+  CHECK_STR_FN(sanitise_dirname("LOUD DIR"), "loud_dir");
+  CHECK_STR_FN(sanitise_dirname("some.dir.name"), "some_dir_name");
+  CHECK_STR_FN(sanitise_dirname("Stanford (2025)"), "Stanford_(2025)");
+  CHECK_STR_FN(sanitise_dirname("foo(bar)"), "foo(bar)");
+  CHECK_STR_FN(sanitise_dirname("(leading)"), "(leading)");
+  CHECK_STR_FN(sanitise_dirname("qlpq"), "qlpq");
+  CHECK_STR_FN(sanitise_dirname("qrpq"), "qrpq");
+  CHECK_STR_FN(sanitise_dirname("clean_dir"), "clean_dir");
+  return pass;
 }
 
-// escape_for_shell
 bool test_escape_for_shell() {
-  CHECK_STR(escape_for_shell("normal.txt"), "normal.txt");
-  CHECK_STR(escape_for_shell("price$100!.txt"), "price\\$100\\!.txt");
-  CHECK_STR(escape_for_shell("$start"), "\\$start");
-  CHECK_STR(escape_for_shell("end!"), "end\\!");
-  CHECK_STR(escape_for_shell("$!"), "\\$\\!");
-  CHECK_STR(escape_for_shell("$$!!"), "\\$\\$\\!\\!");
-  CHECK_STR(escape_for_shell("a$!b$c!d"), "a\\$\\!b\\$c\\!d");
-  // double quote, backslash, backtick
-  CHECK_STR(escape_for_shell("say\"hi"), "say\\\"hi");
-  CHECK_STR(escape_for_shell("a\\b"), "a\\\\b");
-  CHECK_STR(escape_for_shell("x`y"), "x\\`y");
-  CHECK_STR(escape_for_shell("$!\"\\`"), "\\$\\!\\\"\\\\\\`");
-  CHECK_STR(escape_for_shell(""), "");
-
-  return (!strcmp(escape_for_shell("normal.txt"), "normal.txt") &&
-          !strcmp(escape_for_shell("price$100!.txt"), "price\\$100\\!.txt") &&
-          !strcmp(escape_for_shell("$start"), "\\$start") && !strcmp(escape_for_shell("end!"), "end\\!") &&
-          !strcmp(escape_for_shell("$!"), "\\$\\!") && !strcmp(escape_for_shell("$$!!"), "\\$\\$\\!\\!") &&
-          !strcmp(escape_for_shell("a$!b$c!d"), "a\\$\\!b\\$c\\!d") &&
-          !strcmp(escape_for_shell("say\"hi"), "say\\\"hi") && !strcmp(escape_for_shell("a\\b"), "a\\\\b") &&
-          !strcmp(escape_for_shell("x`y"), "x\\`y") && !strcmp(escape_for_shell("$!\"\\`"), "\\$\\!\\\"\\\\\\`") &&
-          !strcmp(escape_for_shell(""), ""));
+  bool pass = true;
+  CHECK_STR_FN(escape_for_shell("normal.txt"), "normal.txt");
+  CHECK_STR_FN(escape_for_shell("price$100!.txt"), "price\\$100\\!.txt");
+  CHECK_STR_FN(escape_for_shell("$start"), "\\$start");
+  CHECK_STR_FN(escape_for_shell("end!"), "end\\!");
+  CHECK_STR_FN(escape_for_shell("$!"), "\\$\\!");
+  CHECK_STR_FN(escape_for_shell("$$!!"), "\\$\\$\\!\\!");
+  CHECK_STR_FN(escape_for_shell("a$!b$c!d"), "a\\$\\!b\\$c\\!d");
+  CHECK_STR_FN(escape_for_shell("say\"hi"), "say\\\"hi");
+  CHECK_STR_FN(escape_for_shell("a\\b"), "a\\\\b");
+  CHECK_STR_FN(escape_for_shell("x`y"), "x\\`y");
+  CHECK_STR_FN(escape_for_shell("$!\"\\`"), "\\$\\!\\\"\\\\\\`");
+  CHECK_STR_FN(escape_for_shell(""), "");
+  return pass;
 }
 
-// replace_substring
 bool test_replace_substring() {
-  // basic replacement
-  CHECK_STR(replace_substring("hello_world", "_", "-"), "hello-world");
-  // multiple occurrences
-  CHECK_STR(replace_substring("a_a_a", "_", "-"), "a-a-a");
-  // replacement longer than old
-  CHECK_STR(replace_substring("xox", "x", "yz"), "yzoyz");
-  // replacement shorter than old (non-overlapping matches)
-  CHECK_STR(replace_substring("aaaa", "aa", "b"), "bb");
-  // delete occurrences when new_sub is empty
-  CHECK_STR(replace_substring("a_b_c", "_", ""), "abc");
-  // old not found -> unchanged
-  CHECK_STR(replace_substring("abc", "z", "y"), "abc");
-  // empty input string
-  CHECK_STR(replace_substring("", "_", "-"), "");
-  // whole string match
-  CHECK_STR(replace_substring("abc", "abc", "x"), "x");
-  // overlapping pattern behavior (left-to-right, non-overlapping)
-  CHECK_STR(replace_substring("banana", "ana", "a"), "bana");
-  // identity replacement (no change)
-  CHECK_STR(replace_substring("aaa", "a", "a"), "aaa");
-
-  return (
-      !strcmp(replace_substring("hello_world", "_", "-"), "hello-world") &&
-      !strcmp(replace_substring("a_a_a", "_", "-"), "a-a-a") && !strcmp(replace_substring("xox", "x", "yz"), "yzoyz") &&
-      !strcmp(replace_substring("aaaa", "aa", "b"), "bb") && !strcmp(replace_substring("a_b_c", "_", ""), "abc") &&
-      !strcmp(replace_substring("abc", "z", "y"), "abc") && !strcmp(replace_substring("", "_", "-"), "") &&
-      !strcmp(replace_substring("abc", "abc", "x"), "x") && !strcmp(replace_substring("banana", "ana", "a"), "bana") &&
-      !strcmp(replace_substring("aaa", "a", "a"), "aaa"));
+  bool pass = true;
+  CHECK_STR_FN(replace_substring("hello_world", "_", "-"), "hello-world");
+  CHECK_STR_FN(replace_substring("a_a_a", "_", "-"), "a-a-a");
+  CHECK_STR_FN(replace_substring("xox", "x", "yz"), "yzoyz");
+  CHECK_STR_FN(replace_substring("aaaa", "aa", "b"), "bb");
+  CHECK_STR_FN(replace_substring("a_b_c", "_", ""), "abc");
+  CHECK_STR_FN(replace_substring("abc", "z", "y"), "abc");
+  CHECK_STR_FN(replace_substring("", "_", "-"), "");
+  CHECK_STR_FN(replace_substring("abc", "abc", "x"), "x");
+  CHECK_STR_FN(replace_substring("banana", "ana", "a"), "bana");
+  CHECK_STR_FN(replace_substring("aaa", "a", "a"), "aaa");
+  return pass;
 }
 
 int main() {
@@ -207,10 +165,10 @@ int main() {
        test_replace_substring());
 
   if (tests_all_pass) {
-    puts("Passed tests");
+    printf("Passed all %d checks\n", check_count);
     return 0;
   }
 
-  puts("Failed tests");
+  printf("Failed %d checks (of %d)\n", fail_count, check_count);
   return 1;
 }

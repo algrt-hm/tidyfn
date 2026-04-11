@@ -143,6 +143,54 @@ else
   fail "deep recursion path wrong" "a/b/c/Deep_File.txt" "$out"
 fi
 
+# --- Test 11: collision detection — two files sanitise to the same name ---
+t="$TMPDIR_BASE/t11"
+mkdir -p "$t"
+touch "$t/Hello World.txt"
+touch "$t/Hello_World.txt"
+out=$(run_in "$t" -r)
+# Hello_World.txt is already clean, so Hello World.txt must get a suffix
+if echo "$out" | grep -q 'Hello_World_2.txt'; then
+  pass
+else
+  fail "collision not resolved" "Hello_World_2.txt" "$out"
+fi
+
+# --- Test 12: collision detection — file would collide with existing dir ---
+t="$TMPDIR_BASE/t12"
+mkdir -p "$t/foo_bar"
+touch "$t/foo_bar/clean.txt"
+touch "$t/FOO BAR"
+out=$(run_in "$t" -r)
+if echo "$out" | grep -q 'foo_bar_2'; then
+  pass
+else
+  fail "file-dir collision not resolved" "foo_bar_2" "$out"
+fi
+
+# --- Test 13: extension preserved when special char precedes dot ---
+t="$TMPDIR_BASE/t13"
+mkdir -p "$t"
+touch "$t/item_.png"
+touch "$t/emote__.png"
+out=$(run_in "$t")
+if echo "$out" | grep -q '"item.png"' && echo "$out" | grep -q '"emote.png"'; then
+  pass
+else
+  fail "extension not preserved" "item.png and emote.png" "$out"
+fi
+
+# --- Test 14: case-only renames use two-step via temp name ---
+t="$TMPDIR_BASE/t14"
+mkdir -p "$t"
+touch "$t/LICENSE.md"
+out=$(run_in "$t")
+if echo "$out" | grep -q 'tidyfn_tmp'; then
+  pass
+else
+  fail "case-only rename missing two-step" "tidyfn_tmp intermediate" "$out"
+fi
+
 # --- Summary ---
 total=$((PASS + FAIL))
 printf "\n%d/%d integration tests passed\n" "$PASS" "$total"

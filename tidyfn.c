@@ -5,6 +5,7 @@
 #include <stdio.h>   // stdio.h for input/output (printf)
 #include <stdlib.h>  // stdlib.h for memory allocation (malloc, free)
 #include <string.h>  // string.h for string manipulation (strlen, strcpy, strchr, etc.)
+#include <strings.h> // strings.h for strcasecmp
 #include <sys/stat.h>
 #include <unistd.h> // getcwd (POSIX)
 
@@ -147,7 +148,16 @@ char *sanitise_core(const char *s) {
     }
   }
 
-  // 4. Remove double special characters
+  // 4. Remove double special characters, but protect extension dot(s)
+  //    Find where the extension starts so we never collapse those dots.
+  char *ext_start = NULL;
+  char *tar_pos = strstr(temp, ".tar.");
+  if (tar_pos != NULL) {
+    ext_start = tar_pos;
+  } else {
+    ext_start = strrchr(temp, '.');
+  }
+
   char *result = malloc(strlen(temp) + 1);
   if (!result) {
     free(temp);
@@ -160,7 +170,10 @@ char *sanitise_core(const char *s) {
       bool is_special_current = strchr(KEY_NON_ALPHANUMERIC, temp[i]);
       bool is_special_prev = strchr(KEY_NON_ALPHANUMERIC, result[j - 1]);
       if (is_special_current && is_special_prev) {
-        continue; // Skip double special char
+        // Never collapse a dot that is part of the file extension
+        if (temp[i] != '.' || ext_start == NULL || &temp[i] < ext_start) {
+          continue; // collapse
+        }
       }
       result[j++] = temp[i];
     }
@@ -185,13 +198,7 @@ char *sanitise_core(const char *s) {
     memmove(result, start, strlen(start) + 1);
   }
 
-  // 6. Get rid of "_-_" -> "-"
-  // This is complex to do in-place, so we use a helper.
-  // The previous `result` is consumed by `replace_substring`.
-  char *final_result = replace_substring(result, "_-_", "-");
-  free(result);
-
-  return final_result;
+  return result;
 }
 
 /**
@@ -199,7 +206,13 @@ char *sanitise_core(const char *s) {
  * @return A new dynamically allocated string. Caller must free.
  */
 char *sanitise(const char *s) {
-  char *s1 = sanitise_core(s);
+  // Pre-process: replace @ with 'at' and & with 'and' to preserve meaning
+  char *s0a = replace_substring(s, "@", "at");
+  char *s0b = replace_substring(s0a, "&", "and");
+  free(s0a);
+
+  char *s1 = sanitise_core(s0b);
+  free(s0b);
   char *s2 = handle_before_dot(s1);
   char *s3 = remove_all_but_last_dot(s2);
 
@@ -362,6 +375,7 @@ static void print_usage(FILE *stream, const char *prog_name) {
       "  Special shell characters '$', '!', '\"', '\\' and '`' in the original file name are escaped.\n"
       "\n"
       "How file names are sanitised:\n"
+      "  - Replaces '@' with 'at' and '&' with 'and'\n"
       "  - Keeps letters, numbers, space, '.', '-' and '_'\n"
       "  - Converts mostly-UPPERCASE names to lowercase (except 'README.md')\n"
       "  - Replaces spaces with underscores\n"
@@ -369,15 +383,122 @@ static void print_usage(FILE *stream, const char *prog_name) {
       "  - Trims leading and trailing special characters\n"
       "  - Removes a separator before the final '.' (e.g., 'name_.txt' -> 'name.txt')\n"
       "  - Replaces all dots except the last one with underscores (exception for e.g. filename.tar.gz)\n"
+      "  - Detects collisions: if two files would get the same name, appends _2, _3, etc.\n"
       "\n";
 
   fprintf(stream, usage, prog_name);
 }
 
+// --- Collision detection helpers ---
+
+#define NAMESET_INIT_CAP 64
+
+typedef struct {
+  char **entries;
+  size_t count;
+  size_t capacity;
+} NameSet;
+
+static void nameset_init(NameSet *ns) {
+  ns->entries = malloc(NAMESET_INIT_CAP * sizeof(char *));
+  if (!ns->entries) {
+    fprintf(stderr, "Out of memory\n");
+    exit(1);
+  }
+  ns->count = 0;
+  ns->capacity = NAMESET_INIT_CAP;
+}
+
+static void nameset_free(NameSet *ns) {
+  for (size_t i = 0; i < ns->count; i++)
+    free(ns->entries[i]);
+  free(ns->entries);
+}
+
+static bool nameset_contains(const NameSet *ns, const char *name) {
+  for (size_t i = 0; i < ns->count; i++) {
+    if (strcmp(ns->entries[i], name) == 0)
+      return true;
+  }
+  return false;
+}
+
+static void nameset_add(NameSet *ns, const char *name) {
+  if (ns->count >= ns->capacity) {
+    ns->capacity *= 2;
+    char **tmp = realloc(ns->entries, ns->capacity * sizeof(char *));
+    if (!tmp) {
+      fprintf(stderr, "Out of memory\n");
+      exit(1);
+    }
+    ns->entries = tmp;
+  }
+  ns->entries[ns->count++] = strdup(name);
+}
+
+/**
+ * @brief If name is already in claimed, append _2, _3, ... until unique.
+ *        For files, the suffix is inserted before the extension.
+ * @return A new dynamically allocated string. Caller must free.
+ */
+static char *resolve_collision(NameSet *claimed, const char *name, bool is_file) {
+  if (!nameset_contains(claimed, name))
+    return strdup(name);
+
+  char buf[PATH_MAX];
+  for (int n = 2;; n++) {
+    if (is_file) {
+      const char *dot = strrchr(name, '.');
+      if (dot) {
+        snprintf(buf, sizeof(buf), "%.*s_%d%s", (int)(dot - name), name, n, dot);
+      } else {
+        snprintf(buf, sizeof(buf), "%s_%d", name, n);
+      }
+    } else {
+      snprintf(buf, sizeof(buf), "%s_%d", name, n);
+    }
+    if (!nameset_contains(claimed, buf))
+      return strdup(buf);
+  }
+}
+
+/**
+ * @brief Emit a mv command. For case-only renames (e.g. LICENSE.md -> license.md),
+ *        uses a two-step rename via a temp name to avoid prompts on case-insensitive
+ *        filesystems (macOS APFS).
+ */
+static void emit_mv(const char *old_prefixed, const char *new_prefixed, const char *old_name, const char *new_name) {
+  char *old_escaped = escape_for_shell(old_prefixed);
+  char *new_escaped = escape_for_shell(new_prefixed);
+
+  if (strcasecmp(old_name, new_name) == 0) {
+    char tmp_path[PATH_MAX];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tidyfn_tmp", old_prefixed);
+    char *tmp_escaped = escape_for_shell(tmp_path);
+    printf("mv \"%s\" \"%s\" && mv \"%s\" \"%s\"\n", old_escaped, tmp_escaped, tmp_escaped, new_escaped);
+    free(tmp_escaped);
+  } else {
+    printf("mv \"%s\" \"%s\"\n", old_escaped, new_escaped);
+  }
+
+  free(old_escaped);
+  free(new_escaped);
+}
+
+// --- Directory entry collection ---
+
+typedef struct {
+  char *name;
+  bool is_dir;
+} DirEntry;
+
 /**
  * @brief Scan a directory for files to rename.
  * If recursive is true, descend into subdirectories.
  * prefix is prepended to filenames in the output (e.g. "subdir/").
+ *
+ * Uses a two-pass approach: first collects all entries and computes
+ * sanitised names, then detects collisions before emitting mv commands.
  */
 static void scan_directory(const char *path, bool recursive, const char *prefix, int *looked_at, int *renamable,
                            int *dirs_renamable) {
@@ -387,79 +508,137 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
     return;
   }
 
+  // Phase 1: Read all directory entries
+  DirEntry *entries = NULL;
+  size_t entry_count = 0;
+  size_t entry_cap = 0;
+
   struct dirent *dir;
   while ((dir = readdir(d)) != NULL) {
-    const char *entry_name = dir->d_name;
-
-    // Skip hidden files, "." and ".."
-    if (entry_name[0] == '.') {
+    if (dir->d_name[0] == '.')
       continue;
-    }
 
-    // Build the full path for stat
     char full_path[PATH_MAX];
-    snprintf(full_path, sizeof(full_path), "%s/%s", path, entry_name);
+    snprintf(full_path, sizeof(full_path), "%s/%s", path, dir->d_name);
 
-    // Use lstat to avoid following symlinks
     struct stat path_stat;
-    if (lstat(full_path, &path_stat) != 0) {
+    if (lstat(full_path, &path_stat) != 0)
+      continue;
+    if (!S_ISDIR(path_stat.st_mode) && !S_ISREG(path_stat.st_mode))
+      continue;
+
+    // Skip filenames containing newlines — they would break the generated mv commands
+    if (strchr(dir->d_name, '\n')) {
+      fprintf(stderr, "Warning: skipping entry with newline in name: %s/%s\n", path, dir->d_name);
       continue;
     }
 
-    if (S_ISDIR(path_stat.st_mode)) {
-      if (recursive) {
-        // Build the new prefix using the original directory name
-        char new_prefix[PATH_MAX];
-        snprintf(new_prefix, sizeof(new_prefix), "%s%s/", prefix, entry_name);
-        scan_directory(full_path, recursive, new_prefix, looked_at, renamable, dirs_renamable);
-
-        // After processing contents, rename the directory itself if needed
-        char *new_dir_name = sanitise_dirname(entry_name);
-        if (strcmp(entry_name, new_dir_name) != 0) {
-          char old_prefixed[PATH_MAX];
-          char new_prefixed[PATH_MAX];
-          snprintf(old_prefixed, sizeof(old_prefixed), "%s%s", prefix, entry_name);
-          snprintf(new_prefixed, sizeof(new_prefixed), "%s%s", prefix, new_dir_name);
-
-          char *old_escaped = escape_for_shell(old_prefixed);
-          char *new_escaped = escape_for_shell(new_prefixed);
-          printf("mv \"%s\" \"%s\"\n", old_escaped, new_escaped);
-          free(old_escaped);
-          free(new_escaped);
-          (*dirs_renamable)++;
-        }
-        free(new_dir_name);
+    if (entry_count >= entry_cap) {
+      entry_cap = entry_cap ? entry_cap * 2 : 32;
+      DirEntry *tmp = realloc(entries, entry_cap * sizeof(DirEntry));
+      if (!tmp) {
+        fprintf(stderr, "Out of memory\n");
+        for (size_t j = 0; j < entry_count; j++)
+          free(entries[j].name);
+        free(entries);
+        return;
       }
-      continue;
+      entries = tmp;
     }
+    entries[entry_count].name = strdup(dir->d_name);
+    entries[entry_count].is_dir = S_ISDIR(path_stat.st_mode);
+    entry_count++;
+  }
+  closedir(d);
 
-    if (!S_ISREG(path_stat.st_mode)) {
-      continue;
+  // Phase 2: Recurse into subdirectories (depth-first, before renaming)
+  if (recursive) {
+    for (size_t i = 0; i < entry_count; i++) {
+      if (!entries[i].is_dir)
+        continue;
+      char full_path[PATH_MAX];
+      snprintf(full_path, sizeof(full_path), "%s/%s", path, entries[i].name);
+      char new_prefix[PATH_MAX];
+      snprintf(new_prefix, sizeof(new_prefix), "%s%s/", prefix, entries[i].name);
+      scan_directory(full_path, recursive, new_prefix, looked_at, renamable, dirs_renamable);
     }
-
-    // Sanitise only the basename
-    char *new_name = sanitise(entry_name);
-
-    if (strcmp(entry_name, new_name) != 0) {
-      // Build prefixed old and new names for the mv command
-      char old_prefixed[PATH_MAX];
-      char new_prefixed[PATH_MAX];
-      snprintf(old_prefixed, sizeof(old_prefixed), "%s%s", prefix, entry_name);
-      snprintf(new_prefixed, sizeof(new_prefixed), "%s%s", prefix, new_name);
-
-      char *old_escaped = escape_for_shell(old_prefixed);
-      char *new_escaped = escape_for_shell(new_prefixed);
-      printf("mv \"%s\" \"%s\"\n", old_escaped, new_escaped);
-      free(old_escaped);
-      free(new_escaped);
-      (*renamable)++;
-    }
-
-    free(new_name);
-    (*looked_at)++;
   }
 
-  closedir(d);
+  // Phase 3: Compute sanitised names and build the claimed-names set
+  NameSet claimed;
+  nameset_init(&claimed);
+
+  char **sanitised = calloc(entry_count, sizeof(char *));
+
+  for (size_t i = 0; i < entry_count; i++) {
+    if (entries[i].is_dir) {
+      sanitised[i] = recursive ? sanitise_dirname(entries[i].name) : strdup(entries[i].name);
+    } else {
+      sanitised[i] = sanitise(entries[i].name);
+      (*looked_at)++;
+    }
+
+    // Names that won't change are immediately claimed
+    if (strcmp(entries[i].name, sanitised[i]) == 0) {
+      nameset_add(&claimed, entries[i].name);
+    }
+  }
+
+  // Phase 4: Emit mv commands — files first, then directories
+  for (size_t i = 0; i < entry_count; i++) {
+    if (entries[i].is_dir)
+      continue;
+    if (strcmp(entries[i].name, sanitised[i]) == 0)
+      continue;
+
+    char *target = resolve_collision(&claimed, sanitised[i], true);
+    nameset_add(&claimed, target);
+
+    if (strcmp(sanitised[i], target) != 0) {
+      fprintf(stderr, "Warning: collision avoided: '%s' -> '%s' (instead of '%s')\n", entries[i].name, target,
+              sanitised[i]);
+    }
+
+    char old_prefixed[PATH_MAX], new_prefixed[PATH_MAX];
+    snprintf(old_prefixed, sizeof(old_prefixed), "%s%s", prefix, entries[i].name);
+    snprintf(new_prefixed, sizeof(new_prefixed), "%s%s", prefix, target);
+    emit_mv(old_prefixed, new_prefixed, entries[i].name, target);
+    (*renamable)++;
+    free(target);
+  }
+
+  if (recursive) {
+    for (size_t i = 0; i < entry_count; i++) {
+      if (!entries[i].is_dir)
+        continue;
+      if (strcmp(entries[i].name, sanitised[i]) == 0)
+        continue;
+
+      char *target = resolve_collision(&claimed, sanitised[i], false);
+      nameset_add(&claimed, target);
+
+      if (strcmp(sanitised[i], target) != 0) {
+        fprintf(stderr, "Warning: collision avoided: '%s' -> '%s' (instead of '%s')\n", entries[i].name, target,
+                sanitised[i]);
+      }
+
+      char old_prefixed[PATH_MAX], new_prefixed[PATH_MAX];
+      snprintf(old_prefixed, sizeof(old_prefixed), "%s%s", prefix, entries[i].name);
+      snprintf(new_prefixed, sizeof(new_prefixed), "%s%s", prefix, target);
+      emit_mv(old_prefixed, new_prefixed, entries[i].name, target);
+      (*dirs_renamable)++;
+      free(target);
+    }
+  }
+
+  // Cleanup
+  nameset_free(&claimed);
+  for (size_t i = 0; i < entry_count; i++) {
+    free(entries[i].name);
+    free(sanitised[i]);
+  }
+  free(entries);
+  free(sanitised);
 }
 
 /**
