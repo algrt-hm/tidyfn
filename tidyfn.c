@@ -527,9 +527,19 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
     if (!S_ISDIR(path_stat.st_mode) && !S_ISREG(path_stat.st_mode))
       continue;
 
-    // Skip filenames containing newlines — they would break the generated mv commands
-    if (strchr(dir->d_name, '\n')) {
-      fprintf(stderr, "Warning: skipping entry with newline in name: %s/%s\n", path, dir->d_name);
+    // Skip filenames containing control characters (newline, carriage return, tab, etc.) —
+    // they break the generated mv commands, since a control byte embedded in the quoted
+    // source name gets mangled when the output is copy-pasted back into a shell. The common
+    // case is the macOS custom-folder-icon file, literally named "Icon\r" (trailing CR).
+    bool has_control_char = false;
+    for (const char *p = dir->d_name; *p; p++) {
+      if ((unsigned char)*p < 0x20) {
+        has_control_char = true;
+        break;
+      }
+    }
+    if (has_control_char) {
+      fprintf(stderr, "Warning: skipping entry with control character in name: %s/%s\n", path, dir->d_name);
       continue;
     }
 

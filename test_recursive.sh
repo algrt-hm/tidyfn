@@ -191,6 +191,29 @@ else
   fail "case-only rename missing two-step" "tidyfn_tmp intermediate" "$out"
 fi
 
+# --- Test 15: filenames with control characters are skipped ---
+# Regression test for the macOS custom-folder-icon file, which is literally named
+# "Icon" followed by a carriage return ("Icon\r"). Such a name must never produce an
+# mv command: the embedded control byte sits inside the quoted source name and gets
+# mangled when the output is copy-pasted back into a shell (the \r is read as a line
+# break), so the rename targets a file that does not exist. The skip warning must go
+# to stderr only, never to stdout — stdout is the payload the user pipes to pbcopy.
+t="$TMPDIR_BASE/t15"
+mkdir -p "$t"
+printf 'x' > "$t/$(printf 'Icon\r')"  # "Icon" + carriage return, as Finder creates it
+touch "$t/Bad File.txt"               # a normal file that should still be renamed
+stdout=$(cd "$t" && "$TIDYFN" 2>/dev/null)      # the copy-paste payload
+stderr=$(cd "$t" && "$TIDYFN" 2>&1 1>/dev/null) # the warnings
+if echo "$stdout" | grep -q 'Icon'; then
+  fail "control-char filename emitted an mv command" "no Icon line on stdout" "$stdout"
+elif ! echo "$stdout" | grep -q 'Bad_File.txt'; then
+  fail "normal file not renamed alongside skipped icon" "Bad_File.txt on stdout" "$stdout"
+elif ! echo "$stderr" | grep -q 'control character'; then
+  fail "no skip warning on stderr" "control character warning" "$stderr"
+else
+  pass
+fi
+
 # --- Summary ---
 total=$((PASS + FAIL))
 printf "\n%d/%d integration tests passed\n" "$PASS" "$total"

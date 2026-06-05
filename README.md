@@ -36,6 +36,19 @@ mv "Stanford CME295 Transformers & LLMs ｜ Autumn 2025 ｜ Lecture 1 - Transfor
 - Removes a separator before the final `.` (e.g. `name_.txt` -> `name.txt`)
 - Replaces all dots except the last with underscores (preserves `.tar.gz` etc.)
 
+## What is skipped
+
+Some entries are left untouched and never appear in the output:
+
+- Dotfiles (names starting with `.`)
+- Anything that isn't a regular file or directory (symlinks, sockets, etc.)
+- Names containing control characters — most notably the macOS custom-folder-icon
+  file, which is literally named `Icon` followed by a trailing carriage return.
+  Emitting an `mv` for it would produce a broken command, because the control byte
+  sits inside the quoted source name and gets mangled when the output is copied and
+  pasted back into a shell. These are skipped with a warning on stderr, so the
+  warning never ends up in the copy-and-paste output.
+
 ## Files
 
 ```
