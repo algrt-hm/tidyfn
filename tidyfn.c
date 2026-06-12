@@ -355,6 +355,76 @@ char *sanitise_dirname(const char *original) {
   return result;
 }
 
+// --- Collision detection helpers ---
+
+#define NAMESET_INIT_CAP 64
+
+void nameset_init(NameSet *ns) {
+  ns->entries = malloc(NAMESET_INIT_CAP * sizeof(char *));
+  if (!ns->entries) {
+    fprintf(stderr, "Out of memory\n");
+    exit(1);
+  }
+  ns->count = 0;
+  ns->capacity = NAMESET_INIT_CAP;
+}
+
+void nameset_free(NameSet *ns) {
+  for (size_t i = 0; i < ns->count; i++)
+    free(ns->entries[i]);
+  free(ns->entries);
+}
+
+bool nameset_contains(const NameSet *ns, const char *name) {
+  for (size_t i = 0; i < ns->count; i++) {
+    if (strcmp(ns->entries[i], name) == 0)
+      return true;
+  }
+  return false;
+}
+
+void nameset_add(NameSet *ns, const char *name) {
+  if (ns->count >= ns->capacity) {
+    ns->capacity *= 2;
+    char **tmp = realloc(ns->entries, ns->capacity * sizeof(char *));
+    if (!tmp) {
+      fprintf(stderr, "Out of memory\n");
+      exit(1);
+    }
+    ns->entries = tmp;
+  }
+  ns->entries[ns->count++] = strdup(name);
+}
+
+/**
+ * @brief If name is already in claimed, append _2, _3, ... until unique.
+ *        For files, the suffix is inserted before the extension
+ *        (before '.tar.' for compound extensions like .tar.gz).
+ * @return A new dynamically allocated string. Caller must free.
+ */
+char *resolve_collision(NameSet *claimed, const char *name, bool is_file) {
+  if (!nameset_contains(claimed, name))
+    return strdup(name);
+
+  char buf[PATH_MAX];
+  for (int n = 2;; n++) {
+    if (is_file) {
+      const char *dot = strstr(name, ".tar.");
+      if (!dot)
+        dot = strrchr(name, '.');
+      if (dot) {
+        snprintf(buf, sizeof(buf), "%.*s_%d%s", (int)(dot - name), name, n, dot);
+      } else {
+        snprintf(buf, sizeof(buf), "%s_%d", name, n);
+      }
+    } else {
+      snprintf(buf, sizeof(buf), "%s_%d", name, n);
+    }
+    if (!nameset_contains(claimed, buf))
+      return strdup(buf);
+  }
+}
+
 #ifndef TESTING
 
 /**
@@ -384,82 +454,31 @@ static void print_usage(FILE *stream, const char *prog_name) {
       "  - Removes a separator before the final '.' (e.g., 'name_.txt' -> 'name.txt')\n"
       "  - Replaces all dots except the last one with underscores (exception for e.g. filename.tar.gz)\n"
       "  - Detects collisions: if two files would get the same name, appends _2, _3, etc.\n"
+      "\n"
+      "Library/dependency directories (node_modules, __pycache__, venv, virtualenv, env,\n"
+      "site-packages, vendor) and hidden entries are skipped entirely:\n"
+      "never renamed and never recursed into.\n"
       "\n";
 
   fprintf(stream, usage, prog_name);
 }
 
-// --- Collision detection helpers ---
+// --- Library/dependency directory exclusion ---
 
-#define NAMESET_INIT_CAP 64
+// Directory names that hold tool-managed library code rather than user files.
+// Renaming anything inside these would break the tooling that owns them, so
+// they are skipped entirely: not renamed, not recursed into. Hidden ones
+// (.git, .venv, .tox, ...) are already covered by the dot-prefix skip.
+static const char *EXCLUDED_DIRS[] = {
+    "node_modules", "__pycache__", "venv", "virtualenv", "env", "site-packages", "vendor",
+};
 
-typedef struct {
-  char **entries;
-  size_t count;
-  size_t capacity;
-} NameSet;
-
-static void nameset_init(NameSet *ns) {
-  ns->entries = malloc(NAMESET_INIT_CAP * sizeof(char *));
-  if (!ns->entries) {
-    fprintf(stderr, "Out of memory\n");
-    exit(1);
-  }
-  ns->count = 0;
-  ns->capacity = NAMESET_INIT_CAP;
-}
-
-static void nameset_free(NameSet *ns) {
-  for (size_t i = 0; i < ns->count; i++)
-    free(ns->entries[i]);
-  free(ns->entries);
-}
-
-static bool nameset_contains(const NameSet *ns, const char *name) {
-  for (size_t i = 0; i < ns->count; i++) {
-    if (strcmp(ns->entries[i], name) == 0)
+static bool is_excluded_dir(const char *name) {
+  for (size_t i = 0; i < sizeof(EXCLUDED_DIRS) / sizeof(EXCLUDED_DIRS[0]); i++) {
+    if (strcmp(name, EXCLUDED_DIRS[i]) == 0)
       return true;
   }
   return false;
-}
-
-static void nameset_add(NameSet *ns, const char *name) {
-  if (ns->count >= ns->capacity) {
-    ns->capacity *= 2;
-    char **tmp = realloc(ns->entries, ns->capacity * sizeof(char *));
-    if (!tmp) {
-      fprintf(stderr, "Out of memory\n");
-      exit(1);
-    }
-    ns->entries = tmp;
-  }
-  ns->entries[ns->count++] = strdup(name);
-}
-
-/**
- * @brief If name is already in claimed, append _2, _3, ... until unique.
- *        For files, the suffix is inserted before the extension.
- * @return A new dynamically allocated string. Caller must free.
- */
-static char *resolve_collision(NameSet *claimed, const char *name, bool is_file) {
-  if (!nameset_contains(claimed, name))
-    return strdup(name);
-
-  char buf[PATH_MAX];
-  for (int n = 2;; n++) {
-    if (is_file) {
-      const char *dot = strrchr(name, '.');
-      if (dot) {
-        snprintf(buf, sizeof(buf), "%.*s_%d%s", (int)(dot - name), name, n, dot);
-      } else {
-        snprintf(buf, sizeof(buf), "%s_%d", name, n);
-      }
-    } else {
-      snprintf(buf, sizeof(buf), "%s_%d", name, n);
-    }
-    if (!nameset_contains(claimed, buf))
-      return strdup(buf);
-  }
 }
 
 /**
@@ -564,7 +583,7 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
   // Phase 2: Recurse into subdirectories (depth-first, before renaming)
   if (recursive) {
     for (size_t i = 0; i < entry_count; i++) {
-      if (!entries[i].is_dir)
+      if (!entries[i].is_dir || is_excluded_dir(entries[i].name))
         continue;
       char full_path[PATH_MAX];
       snprintf(full_path, sizeof(full_path), "%s/%s", path, entries[i].name);
@@ -582,7 +601,10 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
 
   for (size_t i = 0; i < entry_count; i++) {
     if (entries[i].is_dir) {
-      sanitised[i] = recursive ? sanitise_dirname(entries[i].name) : strdup(entries[i].name);
+      // Excluded library dirs keep their name verbatim: name == sanitised means
+      // no mv is emitted, while the name still claims its slot in the collision set.
+      sanitised[i] = (recursive && !is_excluded_dir(entries[i].name)) ? sanitise_dirname(entries[i].name)
+                                                                      : strdup(entries[i].name);
     } else {
       sanitised[i] = sanitise(entries[i].name);
       (*looked_at)++;

@@ -214,6 +214,25 @@ else
   pass
 fi
 
+# --- Test 16: library/dependency directories are excluded ---
+# node_modules etc. must be neither recursed into nor renamed. __pycache__ is the
+# interesting rename case: without the exclusion its leading/trailing underscores
+# would be trimmed, producing a rename to "pycache".
+t="$TMPDIR_BASE/t16"
+mkdir -p "$t/node_modules/some-pkg" "$t/__pycache__" "$t/venv/lib" "$t/Messy Dir"
+touch "$t/node_modules/some-pkg/Messy File.txt"
+touch "$t/__pycache__/Mod Name.pyc"
+touch "$t/venv/lib/Messy Lib.py"
+touch "$t/Messy Dir/Keep Me.txt"
+out=$(run_in "$t" -r)
+if echo "$out" | grep -q 'node_modules\|pycache\|venv'; then
+  fail "library dir processed" "no node_modules/__pycache__/venv in output" "$out"
+elif ! echo "$out" | grep -q 'Messy Dir/Keep Me.txt'; then
+  fail "normal dir not processed alongside excluded dirs" "Messy Dir/Keep Me.txt rename" "$out"
+else
+  pass
+fi
+
 # --- Summary ---
 total=$((PASS + FAIL))
 printf "\n%d/%d integration tests passed\n" "$PASS" "$total"

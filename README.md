@@ -41,6 +41,9 @@ mv "Stanford CME295 Transformers & LLMs ｜ Autumn 2025 ｜ Lecture 1 - Transfor
 Some entries are left untouched and never appear in the output:
 
 - Dotfiles (names starting with `.`)
+- Library/dependency directories — `node_modules`, `__pycache__`, `venv`,
+  `virtualenv`, `env`, `site-packages`, `vendor` — are never renamed and never
+  recursed into; their contents belong to tooling, not to you
 - Anything that isn't a regular file or directory (symlinks, sockets, etc.)
 - Names containing control characters — most notably the macOS custom-folder-icon
   file, which is literally named `Icon` followed by a trailing carriage return.

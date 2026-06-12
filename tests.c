@@ -158,11 +158,60 @@ bool test_replace_substring() {
   return pass;
 }
 
+bool test_nameset() {
+  bool pass = true;
+  NameSet ns;
+  nameset_init(&ns);
+
+  CHECK(nameset_contains(&ns, "a.txt"), false, "%d");
+  nameset_add(&ns, "a.txt");
+  CHECK(nameset_contains(&ns, "a.txt"), true, "%d");
+  CHECK(nameset_contains(&ns, "b.txt"), false, "%d");
+
+  // Grow past the initial capacity to exercise realloc
+  char name[32];
+  for (int i = 0; i < 100; i++) {
+    snprintf(name, sizeof(name), "file_%d.txt", i);
+    nameset_add(&ns, name);
+  }
+  CHECK(nameset_contains(&ns, "file_0.txt"), true, "%d");
+  CHECK(nameset_contains(&ns, "file_99.txt"), true, "%d");
+  CHECK(nameset_contains(&ns, "file_100.txt"), false, "%d");
+
+  nameset_free(&ns);
+  return pass;
+}
+
+bool test_resolve_collision() {
+  bool pass = true;
+  NameSet claimed;
+  nameset_init(&claimed);
+  nameset_add(&claimed, "file.txt");
+  nameset_add(&claimed, "file_2.txt");
+  nameset_add(&claimed, "makefile");
+  nameset_add(&claimed, "archive.tar.gz");
+  nameset_add(&claimed, "some.dir");
+
+  // No collision: name returned unchanged
+  CHECK_STR_FN(resolve_collision(&claimed, "other.txt", true), "other.txt");
+  // File collision: suffix inserted before the extension
+  CHECK_STR_FN(resolve_collision(&claimed, "file.txt", true), "file_3.txt");
+  // File without extension: suffix appended
+  CHECK_STR_FN(resolve_collision(&claimed, "makefile", true), "makefile_2");
+  // Compound extension: suffix inserted before '.tar.gz', not the last dot
+  CHECK_STR_FN(resolve_collision(&claimed, "archive.tar.gz", true), "archive_2.tar.gz");
+  // Directory: suffix appended even when the name contains a dot
+  CHECK_STR_FN(resolve_collision(&claimed, "some.dir", false), "some.dir_2");
+
+  nameset_free(&claimed);
+  return pass;
+}
+
 int main() {
   bool tests_all_pass =
       (test_is_ascii() && test_proportion_block_caps() && test_handle_last_dot() && test_remove_all_but_last_dot() &&
        test_sanitise_core() && test_sanitise() && test_sanitise_dirname() && test_escape_for_shell() &&
-       test_replace_substring());
+       test_replace_substring() && test_nameset() && test_resolve_collision());
 
   if (tests_all_pass) {
     printf("Passed all %d checks\n", check_count);
