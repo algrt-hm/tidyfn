@@ -26,16 +26,33 @@ static bool is_caps_exception(const char *s) {
   return false;
 }
 
-// Uppercase camera-file extensions: names like IMG_1234.JPG or IMG_0687.HEIC are
-// canonical camera-generated identifiers, so the mostly-caps lowercase rule
-// must leave them alone
-static const char *CAPS_EXT_EXCEPTIONS[] = {".JPG", ".HEIC"};
+// Uppercase camera-file extensions: names like IMG_1234.JPG, IMG_0687.HEIC,
+// IMG_O0631.AAE or TALGE0042.MOV are canonical camera-generated identifiers,
+// so the mostly-caps lowercase rule must leave them alone
+static const char *CAPS_EXT_EXCEPTIONS[] = {".JPG", ".HEIC", ".AAE", ".MOV"};
 
 static bool has_caps_ext_exception(const char *s) {
   size_t len = strlen(s);
   for (size_t i = 0; i < sizeof(CAPS_EXT_EXCEPTIONS) / sizeof(CAPS_EXT_EXCEPTIONS[0]); i++) {
     size_t ext_len = strlen(CAPS_EXT_EXCEPTIONS[i]);
     if (len >= ext_len && strcmp(s + len - ext_len, CAPS_EXT_EXCEPTIONS[i]) == 0)
+      return true;
+  }
+  return false;
+}
+
+// Excel owner/lock files ('~$Report.xlsx') are transient files Office creates
+// alongside an open workbook. Stripping the '~$' prefix would make the name
+// collide with the real workbook, so they are left untouched.
+static bool is_excel_lockfile(const char *s) {
+  if (s[0] != '~')
+    return false;
+  const char *last_dot = strrchr(s, '.');
+  if (!last_dot)
+    return false;
+  for (const char *p = last_dot + 1; p[0] && p[1] && p[2]; p++) {
+    if (tolower((unsigned char)p[0]) == 'x' && tolower((unsigned char)p[1]) == 'l' &&
+        tolower((unsigned char)p[2]) == 's')
       return true;
   }
   return false;
@@ -180,7 +197,7 @@ char *sanitise_core(const char *s) {
   temp[k] = '\0';
 
   // 2. Convert to lowercase if mostly caps (except README.md, CLAUDE.md, AGENTS.md
-  //    and camera files ending in .JPG/.HEIC)
+  //    and camera files ending in .JPG/.HEIC/.AAE/.MOV)
   if (!is_caps_exception(temp) && !has_caps_ext_exception(temp) && proportion_block_caps(temp) > 0.5) {
     for (int i = 0; temp[i]; i++) {
       temp[i] = tolower((unsigned char)temp[i]);
@@ -305,6 +322,11 @@ char *sanitise(const char *s) {
   if (contains_cjk(s))
     return strdup(s);
 
+  // Excel lock files keep their '~$' prefix: sanitising it away would
+  // collide with the workbook the lock file belongs to.
+  if (is_excel_lockfile(s))
+    return strdup(s);
+
   // Pre-process: replace @ with 'at' and & with 'and' to preserve meaning
   char *s0a = replace_substring(s, "@", "at");
   char *s0b = replace_substring(s0a, "&", "and");
@@ -321,16 +343,22 @@ char *sanitise(const char *s) {
 }
 
 /**
- * @brief Escapes characters that are special to the shell.
+ * @brief Escapes characters that are special to the shell inside double quotes.
+ *
+ * '!' is only special during interactive history expansion, and '\!' inside
+ * double quotes keeps its backslash when run from a script — so escape it
+ * only when escape_bang is set (i.e. output is a terminal, destined for
+ * copy-paste into an interactive shell), not when writing to a pipe or file.
+ *
  * @return A new dynamically allocated string. Caller must free.
  */
-char *escape_for_shell(const char *s) {
+char *escape_for_shell(const char *s, bool escape_bang) {
   size_t len = strlen(s);
   size_t escaped_len = len;
 
   // First pass: count how many characters need escaping
   for (size_t i = 0; i < len; i++) {
-    if (s[i] == '!' || s[i] == '$' || s[i] == '"' || s[i] == '\\' || s[i] == '`') {
+    if ((s[i] == '!' && escape_bang) || s[i] == '$' || s[i] == '"' || s[i] == '\\' || s[i] == '`') {
       escaped_len++;
     }
   }
@@ -342,7 +370,7 @@ char *escape_for_shell(const char *s) {
   // Second pass: build the new string
   size_t j = 0;
   for (size_t i = 0; i < len; i++) {
-    if (s[i] == '!' || s[i] == '$' || s[i] == '"' || s[i] == '\\' || s[i] == '`') {
+    if ((s[i] == '!' && escape_bang) || s[i] == '$' || s[i] == '"' || s[i] == '\\' || s[i] == '`') {
       result[j++] = '\\';
     }
     result[j++] = s[i];
@@ -548,13 +576,16 @@ static void print_usage(FILE *stream, const char *prog_name) {
       "\n"
       "Output format:\n"
       "  mv <original file name> <sanitised file name>\n"
-      "  Special shell characters '$', '!', '\"', '\\' and '`' in the original file name are escaped.\n"
+      "  Special shell characters '$', '\"', '\\' and '`' in the original file name are escaped.\n"
+      "  '!' is escaped only when output goes to a terminal (for interactive copy-paste);\n"
+      "  when piped or redirected to a script, '!' is left alone.\n"
       "\n"
       "How file names are sanitised:\n"
       "  - Replaces '@' with 'at' and '&' with 'and'\n"
       "  - Keeps letters, numbers, space, '.', '-' and '_'\n"
       "  - Converts mostly-UPPERCASE names to lowercase (except 'README.md', 'CLAUDE.md', 'AGENTS.md'\n"
-      "    and camera files ending in '.JPG' or '.HEIC')\n"
+      "    and camera files ending in '.JPG', '.HEIC', '.AAE' or '.MOV')\n"
+      "  - Leaves Excel lock files (starting with '~' with 'xls' in the extension) untouched\n"
       "  - Replaces spaces with underscores\n"
       "  - Collapses repeated special characters (space/dot/dash/underscore)\n"
       "  - Trims leading and trailing special characters\n"
@@ -598,13 +629,19 @@ static bool is_excluded_dir(const char *name) {
  *        filesystems (macOS APFS).
  */
 static void emit_mv(const char *old_prefixed, const char *new_prefixed, const char *old_name, const char *new_name) {
-  char *old_escaped = escape_for_shell(old_prefixed);
-  char *new_escaped = escape_for_shell(new_prefixed);
+  // '!' only needs escaping for interactive copy-paste; when output is piped
+  // or redirected to a script, '\!' would survive as a literal backslash.
+  static int out_is_tty = -1;
+  if (out_is_tty < 0)
+    out_is_tty = isatty(fileno(stdout));
+
+  char *old_escaped = escape_for_shell(old_prefixed, out_is_tty);
+  char *new_escaped = escape_for_shell(new_prefixed, out_is_tty);
 
   if (strcasecmp(old_name, new_name) == 0) {
     char tmp_path[PATH_MAX];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tidyfn_tmp", old_prefixed);
-    char *tmp_escaped = escape_for_shell(tmp_path);
+    char *tmp_escaped = escape_for_shell(tmp_path, out_is_tty);
     printf("mv \"%s\" \"%s\" && mv \"%s\" \"%s\"\n", old_escaped, tmp_escaped, tmp_escaped, new_escaped);
     free(tmp_escaped);
   } else {
@@ -782,7 +819,7 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
     char *target = resolve_collision(&claimed, sanitised[i], true);
     nameset_add(&claimed, target);
 
-    if (strcmp(sanitised[i], target) != 0) {
+    if (!stats && strcmp(sanitised[i], target) != 0) {
       fprintf(stderr, "Warning: collision avoided: '%s' -> '%s' (instead of '%s')\n", entries[i].name, target,
               sanitised[i]);
     }
@@ -809,7 +846,7 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
       char *target = resolve_collision(&claimed, sanitised[i], false);
       nameset_add(&claimed, target);
 
-      if (strcmp(sanitised[i], target) != 0) {
+      if (!stats && strcmp(sanitised[i], target) != 0) {
         fprintf(stderr, "Warning: collision avoided: '%s' -> '%s' (instead of '%s')\n", entries[i].name, target,
                 sanitised[i]);
       }

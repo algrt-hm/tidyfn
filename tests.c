@@ -133,10 +133,19 @@ bool test_sanitise() {
   // Conventionally-uppercase names left alone end-to-end
   CHECK_STR_FN(sanitise("CLAUDE.md"), "CLAUDE.md");
   CHECK_STR_FN(sanitise("AGENTS.md"), "AGENTS.md");
-  // Camera files with uppercase .JPG/.HEIC extensions are not lowercased
+  // Camera files with uppercase .JPG/.HEIC/.AAE/.MOV extensions are not lowercased
   CHECK_STR_FN(sanitise("IMG_E1692.JPG"), "IMG_E1692.JPG");
   CHECK_STR_FN(sanitise("DCCZ4920.JPG"), "DCCZ4920.JPG");
   CHECK_STR_FN(sanitise("IMG_0687.HEIC"), "IMG_0687.HEIC");
+  CHECK_STR_FN(sanitise("IMG_O0631.AAE"), "IMG_O0631.AAE");
+  CHECK_STR_FN(sanitise("TALGE0042.MOV"), "TALGE0042.MOV");
+  // Excel lock files ('~' prefix, 'xls' in the extension) are left untouched:
+  // stripping the '~$' would collide with the real workbook
+  CHECK_STR_FN(sanitise("~$Degree_data_2014_2018.xlsx"), "~$Degree_data_2014_2018.xlsx");
+  CHECK_STR_FN(sanitise("~$Old Report.XLS"), "~$Old Report.XLS");
+  CHECK_STR_FN(sanitise("~$macros.xlsm"), "~$macros.xlsm");
+  // ...but a tilde-prefixed non-Excel name is still sanitised
+  CHECK_STR_FN(sanitise("~$Notes File.docx"), "Notes_File.docx");
   // ...but other caps rules still apply elsewhere
   CHECK_STR_FN(sanitise("SCAN 001.PDF"), "scan_001.pdf");
   CHECK_STR_FN(sanitise("MESSY PHOTO NAME.JPG"), "MESSY_PHOTO_NAME.JPG");
@@ -165,18 +174,25 @@ bool test_sanitise_dirname() {
 
 bool test_escape_for_shell() {
   bool pass = true;
-  CHECK_STR_FN(escape_for_shell("normal.txt"), "normal.txt");
-  CHECK_STR_FN(escape_for_shell("price$100!.txt"), "price\\$100\\!.txt");
-  CHECK_STR_FN(escape_for_shell("$start"), "\\$start");
-  CHECK_STR_FN(escape_for_shell("end!"), "end\\!");
-  CHECK_STR_FN(escape_for_shell("$!"), "\\$\\!");
-  CHECK_STR_FN(escape_for_shell("$$!!"), "\\$\\$\\!\\!");
-  CHECK_STR_FN(escape_for_shell("a$!b$c!d"), "a\\$\\!b\\$c\\!d");
-  CHECK_STR_FN(escape_for_shell("say\"hi"), "say\\\"hi");
-  CHECK_STR_FN(escape_for_shell("a\\b"), "a\\\\b");
-  CHECK_STR_FN(escape_for_shell("x`y"), "x\\`y");
-  CHECK_STR_FN(escape_for_shell("$!\"\\`"), "\\$\\!\\\"\\\\\\`");
-  CHECK_STR_FN(escape_for_shell(""), "");
+  // Interactive (tty) mode: '!' escaped to defend against history expansion
+  CHECK_STR_FN(escape_for_shell("normal.txt", true), "normal.txt");
+  CHECK_STR_FN(escape_for_shell("price$100!.txt", true), "price\\$100\\!.txt");
+  CHECK_STR_FN(escape_for_shell("$start", true), "\\$start");
+  CHECK_STR_FN(escape_for_shell("end!", true), "end\\!");
+  CHECK_STR_FN(escape_for_shell("$!", true), "\\$\\!");
+  CHECK_STR_FN(escape_for_shell("$$!!", true), "\\$\\$\\!\\!");
+  CHECK_STR_FN(escape_for_shell("a$!b$c!d", true), "a\\$\\!b\\$c\\!d");
+  CHECK_STR_FN(escape_for_shell("say\"hi", true), "say\\\"hi");
+  CHECK_STR_FN(escape_for_shell("a\\b", true), "a\\\\b");
+  CHECK_STR_FN(escape_for_shell("x`y", true), "x\\`y");
+  CHECK_STR_FN(escape_for_shell("$!\"\\`", true), "\\$\\!\\\"\\\\\\`");
+  CHECK_STR_FN(escape_for_shell("", true), "");
+  // Script (piped/redirected) mode: '!' left alone — '\!' inside double
+  // quotes keeps its backslash when run non-interactively
+  CHECK_STR_FN(escape_for_shell("end!", false), "end!");
+  CHECK_STR_FN(escape_for_shell("price$100!.txt", false), "price\\$100!.txt");
+  CHECK_STR_FN(escape_for_shell("Go Bang!.flac", false), "Go Bang!.flac");
+  CHECK_STR_FN(escape_for_shell("$!\"\\`", false), "\\$!\\\"\\\\\\`");
   return pass;
 }
 

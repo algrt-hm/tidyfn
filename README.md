@@ -40,7 +40,7 @@ clean_dir: 0 renames
 
 Folders are listed alphabetically; the sample uses reservoir sampling, so even
 enormous folders are summarised without holding every rename in memory. Stats
-mode prints no `mv` commands and never modifies anything.
+mode prints no `mv` commands, no collision warnings, and never modifies anything.
 
 ## Example output
 
@@ -51,14 +51,26 @@ mv "Stanford CME295 Transformers & LLMs ｜ Autumn 2025 ｜ Lecture 1 - Transfor
 
 ## How file names are sanitised
 
+- Replaces `@` with `at` and `&` with `and`
 - Keeps letters, numbers, space, `.`, `-` and `_`
 - Converts mostly-UPPERCASE names to lowercase (except `README.md`, `CLAUDE.md` and `AGENTS.md`,
-  and camera files ending in `.JPG` or `.HEIC`, e.g. `IMG_0687.HEIC`)
+  and camera files ending in `.JPG`, `.HEIC`, `.AAE` or `.MOV`, e.g. `IMG_0687.HEIC`)
 - Replaces spaces with underscores
 - Collapses repeated special characters
 - Trims leading and trailing special characters
 - Removes a separator before the final `.` (e.g. `name_.txt` -> `name.txt`)
 - Replaces all dots except the last with underscores (preserves compound extensions like `.tar.gz` and `.min.css`/`.min.js`)
+- Detects collisions: if two entries would end up with the same name, the later one
+  gets `_2`, `_3`, ... appended (before the extension), with a warning on stderr
+  (suppressed in stats mode)
+
+## Shell escaping
+
+Special shell characters `$`, `"`, `\` and `` ` `` in the original file name are
+escaped in the emitted `mv` commands. `!` is escaped only when output goes to a
+terminal (to defend against history expansion on copy-paste); when output is piped
+or redirected to a script, `!` is left alone — inside double quotes a script would
+keep the backslash literally, breaking the `mv`.
 
 ## What is skipped
 
@@ -71,6 +83,9 @@ Some entries are left untouched and never appear in the output:
   (accents, dashes, fullwidth punctuation) is still sanitised as before
 - Windows `Zone.Identifier` artifacts (NTFS alternate data streams that show up
   as e.g. `report.pdf:Zone.Identifier` on non-NTFS filesystems)
+- Excel owner/lock files (starting with `~` with `xls` in the extension, e.g.
+  `~$Report.xlsx`) — stripping the `~$` prefix would make the name collide with
+  the workbook the lock file belongs to
 - Library/dependency directories — `node_modules`, `__pycache__`, `venv`,
   `virtualenv`, `env`, `site-packages`, `vendor` — are never renamed and never
   recursed into; their contents belong to tooling, not to you
