@@ -139,6 +139,11 @@ bool test_sanitise() {
   CHECK_STR_FN(sanitise("IMG_0687.HEIC"), "IMG_0687.HEIC");
   CHECK_STR_FN(sanitise("IMG_O0631.AAE"), "IMG_O0631.AAE");
   CHECK_STR_FN(sanitise("TALGE0042.MOV"), "TALGE0042.MOV");
+  // DVD-Video files with uppercase .VOB/.IFO/.BUP extensions are not lowercased
+  CHECK_STR_FN(sanitise("VIDEO_TS.VOB"), "VIDEO_TS.VOB");
+  CHECK_STR_FN(sanitise("VIDEO_TS.IFO"), "VIDEO_TS.IFO");
+  CHECK_STR_FN(sanitise("VIDEO_TS.BUP"), "VIDEO_TS.BUP");
+  CHECK_STR_FN(sanitise("VTS_01_1.VOB"), "VTS_01_1.VOB");
   // Excel lock files ('~' prefix, 'xls' in the extension) are left untouched:
   // stripping the '~$' would collide with the real workbook
   CHECK_STR_FN(sanitise("~$Degree_data_2014_2018.xlsx"), "~$Degree_data_2014_2018.xlsx");
@@ -169,6 +174,9 @@ bool test_sanitise_dirname() {
   CHECK_STR_FN(sanitise_dirname("qlpq"), "qlpq");
   CHECK_STR_FN(sanitise_dirname("qrpq"), "qrpq");
   CHECK_STR_FN(sanitise_dirname("clean_dir"), "clean_dir");
+  // DVD structure directories keep their conventional uppercase names
+  CHECK_STR_FN(sanitise_dirname("VIDEO_TS"), "VIDEO_TS");
+  CHECK_STR_FN(sanitise_dirname("AUDIO_TS"), "AUDIO_TS");
   return pass;
 }
 

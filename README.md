@@ -42,6 +42,11 @@ Folders are listed alphabetically; the sample uses reservoir sampling, so even
 enormous folders are summarised without holding every rename in memory. Stats
 mode prints no `mv` commands, no collision warnings, and never modifies anything.
 
+Scanning of a folder stops once it has accumulated 1000 renames — the survey
+only needs to say "a lot", not the exact number — and the folder is reported as
+`1000+ renames (scan cut short)`. This keeps one huge folder (e.g. a scrape
+output with hundreds of thousands of files) from stalling the whole survey.
+
 ## Example output
 
 ```
@@ -54,7 +59,9 @@ mv "Stanford CME295 Transformers & LLMs ｜ Autumn 2025 ｜ Lecture 1 - Transfor
 - Replaces `@` with `at` and `&` with `and`
 - Keeps letters, numbers, space, `.`, `-` and `_`
 - Converts mostly-UPPERCASE names to lowercase (except `README.md`, `CLAUDE.md` and `AGENTS.md`,
-  and camera files ending in `.JPG`, `.HEIC`, `.AAE` or `.MOV`, e.g. `IMG_0687.HEIC`)
+  the DVD structure directories `VIDEO_TS` and `AUDIO_TS`,
+  camera files ending in `.JPG`, `.HEIC`, `.AAE` or `.MOV` (e.g. `IMG_0687.HEIC`),
+  and DVD-Video files ending in `.VOB`, `.IFO` or `.BUP` (e.g. `VIDEO_TS.VOB`, `VTS_01_1.IFO`))
 - Replaces spaces with underscores
 - Collapses repeated special characters
 - Trims leading and trailing special characters
@@ -89,6 +96,11 @@ Some entries are left untouched and never appear in the output:
 - Library/dependency directories — `node_modules`, `__pycache__`, `venv`,
   `virtualenv`, `env`, `site-packages`, `vendor` — are never renamed and never
   recursed into; their contents belong to tooling, not to you
+- DVD rip root folders — directories that directly contain a `VIDEO_TS`
+  subdirectory (e.g. `MY_GREAT_DVD/VIDEO_TS/`) — keep their name verbatim: the
+  name is the disc's volume label, which tools use to identify the disc. Their
+  contents are still recursed into; the DVD structure inside is protected by
+  the `VIDEO_TS`/`.VOB`/`.IFO`/`.BUP` exceptions instead
 - Anything that isn't a regular file or directory (symlinks, sockets, etc.)
 - Names containing control characters — most notably the macOS custom-folder-icon
   file, which is literally named `Icon` followed by a trailing carriage return.

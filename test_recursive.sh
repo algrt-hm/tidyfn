@@ -325,6 +325,43 @@ else
   pass
 fi
 
+# --- Test 23: DVD-Video rips are left untouched ---
+# The volume-label root (any dir directly containing VIDEO_TS), the VIDEO_TS
+# structure dir itself, and the uppercase .VOB/.IFO/.BUP files inside must all
+# keep their names; a messy file elsewhere must still be renamed.
+t="$TMPDIR_BASE/t23"
+mkdir -p "$t/MY_GREAT_DVD/VIDEO_TS"
+touch "$t/MY_GREAT_DVD/VIDEO_TS/VIDEO_TS.IFO" \
+      "$t/MY_GREAT_DVD/VIDEO_TS/VIDEO_TS.BUP" \
+      "$t/MY_GREAT_DVD/VIDEO_TS/VIDEO_TS.VOB" \
+      "$t/MY_GREAT_DVD/VIDEO_TS/VTS_01_1.VOB"
+touch "$t/MESSY LOOSE FILE.TXT"
+out=$(run_in "$t" -r)
+if echo "$out" | grep -q 'MY_GREAT_DVD\|VIDEO_TS\|VTS_01'; then
+  fail "DVD rip structure renamed" "no mv for DVD entries" "$out"
+elif ! echo "$out" | grep -q 'messy_loose_file.txt'; then
+  fail "normal file not renamed alongside DVD rip" "messy_loose_file.txt rename" "$out"
+else
+  pass
+fi
+
+# --- Test 24: stats mode — scan of a folder stops after 1000 renames ---
+# A folder with well over 1000 renamable files must be reported as "1000+"
+# (scan cut short), while other folders are still surveyed normally.
+t="$TMPDIR_BASE/t24"
+mkdir -p "$t/Huge Folder/Nested Dir" "$t/Small Folder"
+(cd "$t/Huge Folder" && seq 1 1200 | while read i; do : > "Messy File $i!.txt"; done)
+touch "$t/Huge Folder/Nested Dir/Messy Too.txt"
+touch "$t/Small Folder/File One!.txt"
+out=$(run_in "$t" -s)
+if ! echo "$out" | grep -q '^Huge Folder: 1000+ renames'; then
+  fail "stats scan not capped at 1000" "Huge Folder: 1000+ renames" "$out"
+elif ! echo "$out" | grep -q '^Small Folder: 1 rename$'; then
+  fail "folder after capped one not surveyed" "Small Folder: 1 rename" "$out"
+else
+  pass
+fi
+
 # --- Summary ---
 total=$((PASS + FAIL))
 printf "\n%d/%d integration tests passed\n" "$PASS" "$total"

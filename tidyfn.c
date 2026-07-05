@@ -15,8 +15,10 @@
 // Global constant equivalent to Python's KEY_NON_ALPHANUMERIC
 const char *KEY_NON_ALPHANUMERIC = " .-_";
 
-// Names that are conventionally UPPERCASE and must never be lowercased
-static const char *CAPS_EXCEPTIONS[] = {"README.md", "CLAUDE.md", "AGENTS.md"};
+// Names that are conventionally UPPERCASE and must never be lowercased.
+// VIDEO_TS/AUDIO_TS are the structure directories of a DVD-Video disc; players
+// and ripping tools look them up by exact uppercase name.
+static const char *CAPS_EXCEPTIONS[] = {"README.md", "CLAUDE.md", "AGENTS.md", "VIDEO_TS", "AUDIO_TS"};
 
 static bool is_caps_exception(const char *s) {
   for (size_t i = 0; i < sizeof(CAPS_EXCEPTIONS) / sizeof(CAPS_EXCEPTIONS[0]); i++) {
@@ -28,8 +30,10 @@ static bool is_caps_exception(const char *s) {
 
 // Uppercase camera-file extensions: names like IMG_1234.JPG, IMG_0687.HEIC,
 // IMG_O0631.AAE or TALGE0042.MOV are canonical camera-generated identifiers,
-// so the mostly-caps lowercase rule must leave them alone
-static const char *CAPS_EXT_EXCEPTIONS[] = {".JPG", ".HEIC", ".AAE", ".MOV"};
+// so the mostly-caps lowercase rule must leave them alone. Likewise the
+// DVD-Video extensions .VOB/.IFO/.BUP: names like VIDEO_TS.VOB or VTS_01_1.IFO
+// are mandated by the DVD spec and players resolve them case-sensitively.
+static const char *CAPS_EXT_EXCEPTIONS[] = {".JPG", ".HEIC", ".AAE", ".MOV", ".VOB", ".IFO", ".BUP"};
 
 static bool has_caps_ext_exception(const char *s) {
   size_t len = strlen(s);
@@ -572,7 +576,9 @@ static void print_usage(FILE *stream, const char *prog_name) {
       "  -r            Recurse into subdirectories\n"
       "  -s, --stats   Stats mode: for each folder one level down, print how many renames\n"
       "                a recursive run (-r) would make inside it, plus up to 10 randomly\n"
-      "                sampled renames. Useful from the top of a large drive.\n"
+      "                sampled renames. Useful from the top of a large drive. Scanning of a\n"
+      "                folder stops after 1000 renames (reported as '1000+') so one huge\n"
+      "                folder does not stall the survey.\n"
       "\n"
       "Output format:\n"
       "  mv <original file name> <sanitised file name>\n"
@@ -583,8 +589,9 @@ static void print_usage(FILE *stream, const char *prog_name) {
       "How file names are sanitised:\n"
       "  - Replaces '@' with 'at' and '&' with 'and'\n"
       "  - Keeps letters, numbers, space, '.', '-' and '_'\n"
-      "  - Converts mostly-UPPERCASE names to lowercase (except 'README.md', 'CLAUDE.md', 'AGENTS.md'\n"
-      "    and camera files ending in '.JPG', '.HEIC', '.AAE' or '.MOV')\n"
+      "  - Converts mostly-UPPERCASE names to lowercase (except 'README.md', 'CLAUDE.md', 'AGENTS.md',\n"
+      "    the DVD structure directories 'VIDEO_TS' and 'AUDIO_TS', camera files ending in '.JPG',\n"
+      "    '.HEIC', '.AAE' or '.MOV', and DVD-Video files ending in '.VOB', '.IFO' or '.BUP')\n"
       "  - Leaves Excel lock files (starting with '~' with 'xls' in the extension) untouched\n"
       "  - Replaces spaces with underscores\n"
       "  - Collapses repeated special characters (space/dot/dash/underscore)\n"
@@ -599,7 +606,9 @@ static void print_usage(FILE *stream, const char *prog_name) {
       "never renamed and never recursed into.\n"
       "\n"
       "Also left untouched: names containing Chinese/Japanese/Korean characters (stripping\n"
-      "them would destroy the name) and Windows 'Zone.Identifier' artifact files.\n"
+      "them would destroy the name), Windows 'Zone.Identifier' artifact files, and DVD rip\n"
+      "root folders (directories that directly contain a VIDEO_TS subdirectory, whose name\n"
+      "is the disc's volume label).\n"
       "\n";
 
   fprintf(stream, usage, prog_name);
@@ -621,6 +630,21 @@ static bool is_excluded_dir(const char *name) {
       return true;
   }
   return false;
+}
+
+/**
+ * @brief Check whether path/name is the root of a DVD-Video rip, i.e. a
+ *        directory that directly contains a VIDEO_TS subdirectory. Its name is
+ *        the disc's volume label (conventionally uppercase, e.g. MY_GREAT_DVD),
+ *        which tools use to identify the disc, so it must be kept verbatim.
+ *        Contents are still recursed into: the DVD structure inside is
+ *        protected by the VIDEO_TS/.VOB/.IFO/.BUP caps exceptions instead.
+ */
+static bool is_dvd_volume_dir(const char *path, const char *name) {
+  char video_ts[PATH_MAX];
+  snprintf(video_ts, sizeof(video_ts), "%s/%s/VIDEO_TS", path, name);
+  struct stat st;
+  return stat(video_ts, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
 /**
@@ -655,6 +679,11 @@ static void emit_mv(const char *old_prefixed, const char *new_prefixed, const ch
 // --- Stats mode rename collection ---
 
 #define STATS_SAMPLE_MAX 10
+
+// Stats mode is a survey, not an inventory: once a top-level folder has this
+// many renames the answer is already "a lot", so its scan is cut short and the
+// count is reported with a '+' suffix.
+#define STATS_RENAME_CAP 1000
 
 // Accumulates renames for one top-level folder in stats mode: a total count
 // plus a uniform random sample of the renames (reservoir sampling), so huge
@@ -708,6 +737,11 @@ typedef struct {
  */
 static void scan_directory(const char *path, bool recursive, const char *prefix, int *looked_at, int *renamable,
                            int *dirs_renamable, RenameStats *stats) {
+  // In stats mode, stop descending once the current top-level folder has hit
+  // the rename cap — scanning further can only make a huge number bigger.
+  if (stats && stats->count >= STATS_RENAME_CAP)
+    return;
+
   DIR *d = opendir(path);
   if (d == NULL) {
     fprintf(stderr, "Could not open directory: %s\n", path);
@@ -794,10 +828,12 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
 
   for (size_t i = 0; i < entry_count; i++) {
     if (entries[i].is_dir) {
-      // Excluded library dirs keep their name verbatim: name == sanitised means
-      // no mv is emitted, while the name still claims its slot in the collision set.
-      sanitised[i] = (recursive && !is_excluded_dir(entries[i].name)) ? sanitise_dirname(entries[i].name)
-                                                                      : strdup(entries[i].name);
+      // Excluded library dirs and DVD volume roots keep their name verbatim:
+      // name == sanitised means no mv is emitted, while the name still claims
+      // its slot in the collision set.
+      sanitised[i] = (recursive && !is_excluded_dir(entries[i].name) && !is_dvd_volume_dir(path, entries[i].name))
+                         ? sanitise_dirname(entries[i].name)
+                         : strdup(entries[i].name);
     } else {
       sanitised[i] = sanitise(entries[i].name);
       (*looked_at)++;
@@ -811,6 +847,9 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
 
   // Phase 4: Emit mv commands — files first, then directories
   for (size_t i = 0; i < entry_count; i++) {
+    // The cap must also cut short a single huge flat directory, not just recursion
+    if (stats && stats->count >= STATS_RENAME_CAP)
+      break;
     if (entries[i].is_dir)
       continue;
     if (strcmp(entries[i].name, sanitised[i]) == 0)
@@ -838,6 +877,8 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
 
   if (recursive) {
     for (size_t i = 0; i < entry_count; i++) {
+      if (stats && stats->count >= STATS_RENAME_CAP)
+        break;
       if (!entries[i].is_dir)
         continue;
       if (strcmp(entries[i].name, sanitised[i]) == 0)
@@ -929,7 +970,11 @@ static int run_stats(void) {
     snprintf(prefix, sizeof(prefix), "%s/", dirs[i]);
     scan_directory(dirs[i], true, prefix, &looked_at, &renamable, &dirs_renamable, &stats);
 
-    printf("%s: %d rename%s\n", dirs[i], stats.count, stats.count == 1 ? "" : "s");
+    if (stats.count >= STATS_RENAME_CAP) {
+      printf("%s: %d+ renames (scan cut short)\n", dirs[i], stats.count);
+    } else {
+      printf("%s: %d rename%s\n", dirs[i], stats.count, stats.count == 1 ? "" : "s");
+    }
     for (int s = 0; s < stats.sample_count; s++) {
       printf("  %s\n", stats.samples[s]);
     }
