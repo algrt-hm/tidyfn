@@ -11,6 +11,7 @@ typedef struct {
 
 // Forward declarations of functions
 bool is_ascii(const char *s);
+bool contains_cjk(const char *s);
 float proportion_block_caps(const char *s);
 char *handle_before_dot(const char *s);
 char *remove_all_but_last_dot(const char *s);

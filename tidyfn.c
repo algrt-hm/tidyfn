@@ -7,12 +7,56 @@
 #include <string.h>  // string.h for string manipulation (strlen, strcpy, strchr, etc.)
 #include <strings.h> // strings.h for strcasecmp
 #include <sys/stat.h>
+#include <time.h>   // time, to seed the stats-mode sampler
 #include <unistd.h> // getcwd (POSIX)
 
 #include "tidyfn.h"
 
 // Global constant equivalent to Python's KEY_NON_ALPHANUMERIC
 const char *KEY_NON_ALPHANUMERIC = " .-_";
+
+// Names that are conventionally UPPERCASE and must never be lowercased
+static const char *CAPS_EXCEPTIONS[] = {"README.md", "CLAUDE.md", "AGENTS.md"};
+
+static bool is_caps_exception(const char *s) {
+  for (size_t i = 0; i < sizeof(CAPS_EXCEPTIONS) / sizeof(CAPS_EXCEPTIONS[0]); i++) {
+    if (strcmp(s, CAPS_EXCEPTIONS[i]) == 0)
+      return true;
+  }
+  return false;
+}
+
+// Uppercase camera-file extensions: names like IMG_1234.JPG or IMG_0687.HEIC are
+// canonical camera-generated identifiers, so the mostly-caps lowercase rule
+// must leave them alone
+static const char *CAPS_EXT_EXCEPTIONS[] = {".JPG", ".HEIC"};
+
+static bool has_caps_ext_exception(const char *s) {
+  size_t len = strlen(s);
+  for (size_t i = 0; i < sizeof(CAPS_EXT_EXCEPTIONS) / sizeof(CAPS_EXT_EXCEPTIONS[0]); i++) {
+    size_t ext_len = strlen(CAPS_EXT_EXCEPTIONS[i]);
+    if (len >= ext_len && strcmp(s + len - ext_len, CAPS_EXT_EXCEPTIONS[i]) == 0)
+      return true;
+  }
+  return false;
+}
+
+// Markers that start a compound extension (e.g. archive.tar.gz, bootstrap.min.css)
+// whose inner dot must be preserved
+static const char *COMPOUND_EXT_MARKERS[] = {".tar.", ".min."};
+
+/**
+ * @brief Find the start of a compound extension like '.tar.gz' or '.min.css'.
+ * @return Pointer into s at the marker, or NULL if none present.
+ */
+static const char *compound_extension(const char *s) {
+  for (size_t i = 0; i < sizeof(COMPOUND_EXT_MARKERS) / sizeof(COMPOUND_EXT_MARKERS[0]); i++) {
+    const char *p = strstr(s, COMPOUND_EXT_MARKERS[i]);
+    if (p)
+      return p;
+  }
+  return NULL;
+}
 
 /**
  * @brief Check if the string contains only ASCII characters.
@@ -88,10 +132,11 @@ char *remove_all_but_last_dot(const char *s) {
     return result; // No dots, return copy of original
   }
 
-  // If we see '.tar.' in the string we only replace up to the penultimate dot, not the final one
-  bool tar_in_str = (strstr(s, ".tar.") != NULL);
+  // If we see a compound extension ('.tar.', '.min.') in the string we only
+  // replace up to the penultimate dot, not the final one
+  bool compound_in_str = (compound_extension(s) != NULL);
 
-  if (tar_in_str) {
+  if (compound_in_str) {
     char *penultimate_dot = NULL;
 
     for (char *p = result; p < last_dot; p++) {
@@ -134,8 +179,9 @@ char *sanitise_core(const char *s) {
   }
   temp[k] = '\0';
 
-  // 2. Convert to lowercase if mostly caps (except README.md)
-  if (strcmp(temp, "README.md") != 0 && proportion_block_caps(temp) > 0.5) {
+  // 2. Convert to lowercase if mostly caps (except README.md, CLAUDE.md, AGENTS.md
+  //    and camera files ending in .JPG/.HEIC)
+  if (!is_caps_exception(temp) && !has_caps_ext_exception(temp) && proportion_block_caps(temp) > 0.5) {
     for (int i = 0; temp[i]; i++) {
       temp[i] = tolower((unsigned char)temp[i]);
     }
@@ -150,11 +196,8 @@ char *sanitise_core(const char *s) {
 
   // 4. Remove double special characters, but protect extension dot(s)
   //    Find where the extension starts so we never collapse those dots.
-  char *ext_start = NULL;
-  char *tar_pos = strstr(temp, ".tar.");
-  if (tar_pos != NULL) {
-    ext_start = tar_pos;
-  } else {
+  const char *ext_start = compound_extension(temp);
+  if (ext_start == NULL) {
     ext_start = strrchr(temp, '.');
   }
 
@@ -202,10 +245,66 @@ char *sanitise_core(const char *s) {
 }
 
 /**
+ * @brief Decode one UTF-8 sequence starting at s and store the codepoint in *cp.
+ * @return Number of bytes consumed (1-4); an invalid lead byte is consumed
+ *         alone with *cp set to 0.
+ */
+static size_t utf8_decode(const unsigned char *s, unsigned int *cp) {
+  if (s[0] < 0x80) {
+    *cp = s[0];
+    return 1;
+  }
+  if ((s[0] & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+    *cp = ((unsigned int)(s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+    return 2;
+  }
+  if ((s[0] & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+    *cp = ((unsigned int)(s[0] & 0x0F) << 12) | ((unsigned int)(s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+    return 3;
+  }
+  if ((s[0] & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+    *cp = ((unsigned int)(s[0] & 0x07) << 18) | ((unsigned int)(s[1] & 0x3F) << 12) |
+          ((unsigned int)(s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+    return 4;
+  }
+  *cp = 0;
+  return 1;
+}
+
+/**
+ * @brief Check whether the string contains any Chinese, Japanese or Korean
+ *        letters (Han ideographs, kana, hangul). CJK punctuation and
+ *        fullwidth symbols do not count: stripping those is harmless, but
+ *        stripping CJK letters destroys the name's meaning.
+ */
+bool contains_cjk(const char *s) {
+  const unsigned char *p = (const unsigned char *)s;
+  while (*p) {
+    unsigned int cp;
+    p += utf8_decode(p, &cp);
+    if ((cp >= 0x1100 && cp <= 0x11FF) ||  // Hangul Jamo
+        (cp >= 0x3040 && cp <= 0x30FF) ||  // Hiragana + Katakana
+        (cp >= 0x3400 && cp <= 0x4DBF) ||  // CJK Extension A
+        (cp >= 0x4E00 && cp <= 0x9FFF) ||  // CJK Unified Ideographs
+        (cp >= 0xAC00 && cp <= 0xD7AF) ||  // Hangul Syllables
+        (cp >= 0xF900 && cp <= 0xFAFF) ||  // CJK Compatibility Ideographs
+        (cp >= 0x20000 && cp <= 0x2FA1F))  // CJK Extensions B+, Supplement
+      return true;
+  }
+  return false;
+}
+
+/**
  * @brief Full sanitisation pipeline.
  * @return A new dynamically allocated string. Caller must free.
  */
 char *sanitise(const char *s) {
+  // Names written in CJK scripts would lose their meaning entirely if
+  // non-ASCII were stripped (e.g. a Chinese book title reduced to just its
+  // year), so they are left untouched.
+  if (contains_cjk(s))
+    return strdup(s);
+
   // Pre-process: replace @ with 'at' and & with 'and' to preserve meaning
   char *s0a = replace_substring(s, "@", "at");
   char *s0b = replace_substring(s0a, "&", "and");
@@ -299,6 +398,10 @@ char *replace_substring(const char *str, const char *old, const char *new_sub) {
  * @return A new dynamically allocated string. Caller must free.
  */
 char *sanitise_dirname(const char *original) {
+  // CJK names are left untouched, same as for files
+  if (contains_cjk(original))
+    return strdup(original);
+
   // Strip parens from the original before sanitising
   size_t len = strlen(original);
   char *no_parens = malloc(len + 1);
@@ -409,7 +512,7 @@ char *resolve_collision(NameSet *claimed, const char *name, bool is_file) {
   char buf[PATH_MAX];
   for (int n = 2;; n++) {
     if (is_file) {
-      const char *dot = strstr(name, ".tar.");
+      const char *dot = compound_extension(name);
       if (!dot)
         dot = strrchr(name, '.');
       if (dot) {
@@ -432,13 +535,16 @@ char *resolve_collision(NameSet *claimed, const char *name, bool is_file) {
  */
 static void print_usage(FILE *stream, const char *prog_name) {
   const char *usage =
-      "Usage: %s [-r]\n"
+      "Usage: %s [-r | -s]\n"
       "\n"
       "Scans the current directory for regular files and prints safe rename commands. It does not modify "
       "files itself; it only prints shell 'mv' commands that you can review and run.\n"
       "\n"
       "Options:\n"
-      "  -r    Recurse into subdirectories\n"
+      "  -r            Recurse into subdirectories\n"
+      "  -s, --stats   Stats mode: for each folder one level down, print how many renames\n"
+      "                a recursive run (-r) would make inside it, plus up to 10 randomly\n"
+      "                sampled renames. Useful from the top of a large drive.\n"
       "\n"
       "Output format:\n"
       "  mv <original file name> <sanitised file name>\n"
@@ -447,17 +553,22 @@ static void print_usage(FILE *stream, const char *prog_name) {
       "How file names are sanitised:\n"
       "  - Replaces '@' with 'at' and '&' with 'and'\n"
       "  - Keeps letters, numbers, space, '.', '-' and '_'\n"
-      "  - Converts mostly-UPPERCASE names to lowercase (except 'README.md')\n"
+      "  - Converts mostly-UPPERCASE names to lowercase (except 'README.md', 'CLAUDE.md', 'AGENTS.md'\n"
+      "    and camera files ending in '.JPG' or '.HEIC')\n"
       "  - Replaces spaces with underscores\n"
       "  - Collapses repeated special characters (space/dot/dash/underscore)\n"
       "  - Trims leading and trailing special characters\n"
       "  - Removes a separator before the final '.' (e.g., 'name_.txt' -> 'name.txt')\n"
-      "  - Replaces all dots except the last one with underscores (exception for e.g. filename.tar.gz)\n"
+      "  - Replaces all dots except the last one with underscores (exception for compound\n"
+      "    extensions like filename.tar.gz and bootstrap.min.css)\n"
       "  - Detects collisions: if two files would get the same name, appends _2, _3, etc.\n"
       "\n"
       "Library/dependency directories (node_modules, __pycache__, venv, virtualenv, env,\n"
       "site-packages, vendor) and hidden entries are skipped entirely:\n"
       "never renamed and never recursed into.\n"
+      "\n"
+      "Also left untouched: names containing Chinese/Japanese/Korean characters (stripping\n"
+      "them would destroy the name) and Windows 'Zone.Identifier' artifact files.\n"
       "\n";
 
   fprintf(stream, usage, prog_name);
@@ -504,6 +615,42 @@ static void emit_mv(const char *old_prefixed, const char *new_prefixed, const ch
   free(new_escaped);
 }
 
+// --- Stats mode rename collection ---
+
+#define STATS_SAMPLE_MAX 10
+
+// Accumulates renames for one top-level folder in stats mode: a total count
+// plus a uniform random sample of the renames (reservoir sampling), so huge
+// folders can be summarised without holding every rename in memory.
+typedef struct {
+  int count;                       // total renames recorded so far
+  char *samples[STATS_SAMPLE_MAX]; // reservoir of "old -> new" lines
+  int sample_count;
+} RenameStats;
+
+static void stats_record(RenameStats *stats, const char *old_prefixed, const char *new_prefixed) {
+  char line[2 * PATH_MAX + 8];
+  snprintf(line, sizeof(line), "%s -> %s", old_prefixed, new_prefixed);
+
+  if (stats->sample_count < STATS_SAMPLE_MAX) {
+    stats->samples[stats->sample_count++] = strdup(line);
+  } else {
+    // Reservoir sampling: the i-th rename (0-based) replaces a random slot
+    // with probability STATS_SAMPLE_MAX / (i + 1)
+    int j = rand() % (stats->count + 1);
+    if (j < STATS_SAMPLE_MAX) {
+      free(stats->samples[j]);
+      stats->samples[j] = strdup(line);
+    }
+  }
+  stats->count++;
+}
+
+static void stats_free(RenameStats *stats) {
+  for (int i = 0; i < stats->sample_count; i++)
+    free(stats->samples[i]);
+}
+
 // --- Directory entry collection ---
 
 typedef struct {
@@ -518,9 +665,12 @@ typedef struct {
  *
  * Uses a two-pass approach: first collects all entries and computes
  * sanitised names, then detects collisions before emitting mv commands.
+ *
+ * If stats is non-NULL (stats mode), renames are recorded there instead of
+ * being printed as mv commands.
  */
 static void scan_directory(const char *path, bool recursive, const char *prefix, int *looked_at, int *renamable,
-                           int *dirs_renamable) {
+                           int *dirs_renamable, RenameStats *stats) {
   DIR *d = opendir(path);
   if (d == NULL) {
     fprintf(stderr, "Could not open directory: %s\n", path);
@@ -535,6 +685,12 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
   struct dirent *dir;
   while ((dir = readdir(d)) != NULL) {
     if (dir->d_name[0] == '.')
+      continue;
+
+    // Windows Zone.Identifier artifacts (NTFS alternate data streams that
+    // materialise as separate files on non-NTFS filesystems, e.g.
+    // "report.pdf:Zone.Identifier") are junk metadata: never renamed.
+    if (strstr(dir->d_name, "Zone.Identifier") != NULL)
       continue;
 
     char full_path[PATH_MAX];
@@ -589,7 +745,7 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
       snprintf(full_path, sizeof(full_path), "%s/%s", path, entries[i].name);
       char new_prefix[PATH_MAX];
       snprintf(new_prefix, sizeof(new_prefix), "%s%s/", prefix, entries[i].name);
-      scan_directory(full_path, recursive, new_prefix, looked_at, renamable, dirs_renamable);
+      scan_directory(full_path, recursive, new_prefix, looked_at, renamable, dirs_renamable, stats);
     }
   }
 
@@ -634,7 +790,11 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
     char old_prefixed[PATH_MAX], new_prefixed[PATH_MAX];
     snprintf(old_prefixed, sizeof(old_prefixed), "%s%s", prefix, entries[i].name);
     snprintf(new_prefixed, sizeof(new_prefixed), "%s%s", prefix, target);
-    emit_mv(old_prefixed, new_prefixed, entries[i].name, target);
+    if (stats) {
+      stats_record(stats, old_prefixed, new_prefixed);
+    } else {
+      emit_mv(old_prefixed, new_prefixed, entries[i].name, target);
+    }
     (*renamable)++;
     free(target);
   }
@@ -657,7 +817,11 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
       char old_prefixed[PATH_MAX], new_prefixed[PATH_MAX];
       snprintf(old_prefixed, sizeof(old_prefixed), "%s%s", prefix, entries[i].name);
       snprintf(new_prefixed, sizeof(new_prefixed), "%s%s", prefix, target);
-      emit_mv(old_prefixed, new_prefixed, entries[i].name, target);
+      if (stats) {
+        stats_record(stats, old_prefixed, new_prefixed);
+      } else {
+        emit_mv(old_prefixed, new_prefixed, entries[i].name, target);
+      }
       (*dirs_renamable)++;
       free(target);
     }
@@ -673,6 +837,73 @@ static void scan_directory(const char *path, bool recursive, const char *prefix,
   free(sanitised);
 }
 
+static int compare_names(const void *a, const void *b) { return strcmp(*(const char **)a, *(const char **)b); }
+
+/**
+ * @brief Stats mode: for each folder one level down, report how many renames
+ *        a recursive run (-r) would produce inside it, plus a random sample
+ *        of up to STATS_SAMPLE_MAX of those renames. Intended for a quick
+ *        survey from the top of a large drive (e.g. an NFS mount).
+ */
+static int run_stats(void) {
+  DIR *d = opendir(".");
+  if (d == NULL) {
+    fprintf(stderr, "Could not open current directory\n");
+    return 1;
+  }
+
+  // Collect top-level directory names, applying the usual skips
+  char **dirs = NULL;
+  size_t dir_count = 0, dir_cap = 0;
+  struct dirent *dir;
+  while ((dir = readdir(d)) != NULL) {
+    if (dir->d_name[0] == '.' || is_excluded_dir(dir->d_name))
+      continue;
+    struct stat path_stat;
+    if (lstat(dir->d_name, &path_stat) != 0 || !S_ISDIR(path_stat.st_mode))
+      continue;
+    if (dir_count >= dir_cap) {
+      dir_cap = dir_cap ? dir_cap * 2 : 32;
+      char **tmp = realloc(dirs, dir_cap * sizeof(char *));
+      if (!tmp) {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+      }
+      dirs = tmp;
+    }
+    dirs[dir_count++] = strdup(dir->d_name);
+  }
+  closedir(d);
+
+  if (dir_count == 0) {
+    fprintf(stderr, "No subdirectories found in the working directory\n");
+    free(dirs);
+    return 0;
+  }
+
+  qsort(dirs, dir_count, sizeof(char *), compare_names);
+  srand((unsigned)time(NULL));
+
+  for (size_t i = 0; i < dir_count; i++) {
+    RenameStats stats = {0};
+    int looked_at = 0, renamable = 0, dirs_renamable = 0;
+
+    char prefix[PATH_MAX];
+    snprintf(prefix, sizeof(prefix), "%s/", dirs[i]);
+    scan_directory(dirs[i], true, prefix, &looked_at, &renamable, &dirs_renamable, &stats);
+
+    printf("%s: %d rename%s\n", dirs[i], stats.count, stats.count == 1 ? "" : "s");
+    for (int s = 0; s < stats.sample_count; s++) {
+      printf("  %s\n", stats.samples[s]);
+    }
+
+    stats_free(&stats);
+    free(dirs[i]);
+  }
+  free(dirs);
+  return 0;
+}
+
 /**
  * @brief Main function to find files and generate rename commands.
  */
@@ -681,6 +912,8 @@ int main(int argc, char *argv[]) {
 
   if (argc == 2 && strcmp(argv[1], "-r") == 0) {
     recursive = true;
+  } else if (argc == 2 && (strcmp(argv[1], "-s") == 0 || strcmp(argv[1], "--stats") == 0)) {
+    return run_stats();
   } else if (argc != 1) {
     print_usage(stderr, argv[0]);
     return 2;
@@ -690,7 +923,7 @@ int main(int argc, char *argv[]) {
   int renamable = 0;
   int dirs_renamable = 0;
 
-  scan_directory(".", recursive, "", &looked_at, &renamable, &dirs_renamable);
+  scan_directory(".", recursive, "", &looked_at, &renamable, &dirs_renamable, NULL);
 
   // If no regular files and no directory renames were printed
   if (!looked_at && !dirs_renamable) {

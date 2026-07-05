@@ -47,6 +47,20 @@ bool test_is_ascii() {
   return pass;
 }
 
+bool test_contains_cjk() {
+  bool pass = true;
+  CHECK(contains_cjk("hello.txt"), false, "%d");
+  CHECK(contains_cjk("数学分析教程-常庚哲_史济怀-下册-2003.pdf"), true, "%d");
+  CHECK(contains_cjk("ノート.txt"), true, "%d");
+  CHECK(contains_cjk("ひらがな.md"), true, "%d");
+  CHECK(contains_cjk("한국어 문서.pdf"), true, "%d");
+  // Non-CJK non-ASCII must not count: these should still be sanitised
+  CHECK(contains_cjk("Karpathy — AGI.mp3"), false, "%d");          // em-dash
+  CHECK(contains_cjk("Stanford ｜ Autumn 2025.mp4"), false, "%d"); // fullwidth bar
+  CHECK(contains_cjk("café menu.txt"), false, "%d");
+  return pass;
+}
+
 bool test_proportion_block_caps() {
   bool pass = true;
   CHECK(proportion_block_caps("ARGHH"), 1.0f, "%f");
@@ -68,6 +82,8 @@ bool test_remove_all_but_last_dot() {
   bool pass = true;
   CHECK_STR_FN(remove_all_but_last_dot("bob.tar.gz"), "bob.tar.gz");
   CHECK_STR_FN(remove_all_but_last_dot("bill.tar.bz"), "bill.tar.bz");
+  CHECK_STR_FN(remove_all_but_last_dot("bootstrap.min.css"), "bootstrap.min.css");
+  CHECK_STR_FN(remove_all_but_last_dot("jquery.slim.min.js"), "jquery_slim.min.js");
   CHECK_STR_FN(remove_all_but_last_dot("lots.of.dots.ext"), "lots_of_dots.ext");
   return pass;
 }
@@ -76,9 +92,11 @@ bool test_sanitise_core() {
   bool pass = true;
   // 1. Keep only alphanumeric, ASCII letters, and KEY_NON_ALPHANUMERIC chars
   CHECK_STR_FN(sanitise_core("src.🔥"), "src");
-  // 2. Convert to lowercase if mostly caps (except README.md)
+  // 2. Convert to lowercase if mostly caps (except README.md, CLAUDE.md, AGENTS.md)
   CHECK_STR_FN(sanitise_core("ALL_CAPS.md"), "all_caps.md");
   CHECK_STR_FN(sanitise_core("README.md"), "README.md");
+  CHECK_STR_FN(sanitise_core("CLAUDE.md"), "CLAUDE.md");
+  CHECK_STR_FN(sanitise_core("AGENTS.md"), "AGENTS.md");
   // 3. Replace spaces with underscores
   CHECK_STR_FN(sanitise_core("file name.ext"), "file_name.ext");
   // 4. Remove double special characters (but protect extension dot)
@@ -109,6 +127,24 @@ bool test_sanitise() {
   // tar.gz extension preserved
   CHECK_STR_FN(sanitise("archive.tar.gz"), "archive.tar.gz");
   CHECK_STR_FN(sanitise("my.archive.tar.gz"), "my_archive.tar.gz");
+  // min.css / min.js extensions preserved
+  CHECK_STR_FN(sanitise("bootstrap.min.css"), "bootstrap.min.css");
+  CHECK_STR_FN(sanitise("jquery.slim.min.js"), "jquery_slim.min.js");
+  // Conventionally-uppercase names left alone end-to-end
+  CHECK_STR_FN(sanitise("CLAUDE.md"), "CLAUDE.md");
+  CHECK_STR_FN(sanitise("AGENTS.md"), "AGENTS.md");
+  // Camera files with uppercase .JPG/.HEIC extensions are not lowercased
+  CHECK_STR_FN(sanitise("IMG_E1692.JPG"), "IMG_E1692.JPG");
+  CHECK_STR_FN(sanitise("DCCZ4920.JPG"), "DCCZ4920.JPG");
+  CHECK_STR_FN(sanitise("IMG_0687.HEIC"), "IMG_0687.HEIC");
+  // ...but other caps rules still apply elsewhere
+  CHECK_STR_FN(sanitise("SCAN 001.PDF"), "scan_001.pdf");
+  CHECK_STR_FN(sanitise("MESSY PHOTO NAME.JPG"), "MESSY_PHOTO_NAME.JPG");
+  // Screenshot timestamps still get their dots replaced (not carved out)
+  CHECK_STR_FN(sanitise("Screenshot_2022-01-05_at_17.02.47.png"), "Screenshot_2022-01-05_at_17_02_47.png");
+  // CJK names are left completely untouched
+  CHECK_STR_FN(sanitise("数学分析教程-常庚哲_史济怀-下册-2003.pdf"), "数学分析教程-常庚哲_史济怀-下册-2003.pdf");
+  CHECK_STR_FN(sanitise("ノート メモ.txt"), "ノート メモ.txt");
   return pass;
 }
 
@@ -117,6 +153,7 @@ bool test_sanitise_dirname() {
   CHECK_STR_FN(sanitise_dirname("Bad Dir Name"), "Bad_Dir_Name");
   CHECK_STR_FN(sanitise_dirname("LOUD DIR"), "loud_dir");
   CHECK_STR_FN(sanitise_dirname("some.dir.name"), "some_dir_name");
+  CHECK_STR_FN(sanitise_dirname("中文 目录"), "中文 目录");
   CHECK_STR_FN(sanitise_dirname("Stanford (2025)"), "Stanford_(2025)");
   CHECK_STR_FN(sanitise_dirname("foo(bar)"), "foo(bar)");
   CHECK_STR_FN(sanitise_dirname("(leading)"), "(leading)");
@@ -190,6 +227,7 @@ bool test_resolve_collision() {
   nameset_add(&claimed, "file_2.txt");
   nameset_add(&claimed, "makefile");
   nameset_add(&claimed, "archive.tar.gz");
+  nameset_add(&claimed, "bootstrap.min.css");
   nameset_add(&claimed, "some.dir");
 
   // No collision: name returned unchanged
@@ -200,6 +238,7 @@ bool test_resolve_collision() {
   CHECK_STR_FN(resolve_collision(&claimed, "makefile", true), "makefile_2");
   // Compound extension: suffix inserted before '.tar.gz', not the last dot
   CHECK_STR_FN(resolve_collision(&claimed, "archive.tar.gz", true), "archive_2.tar.gz");
+  CHECK_STR_FN(resolve_collision(&claimed, "bootstrap.min.css", true), "bootstrap_2.min.css");
   // Directory: suffix appended even when the name contains a dot
   CHECK_STR_FN(resolve_collision(&claimed, "some.dir", false), "some.dir_2");
 
@@ -209,7 +248,8 @@ bool test_resolve_collision() {
 
 int main() {
   bool tests_all_pass =
-      (test_is_ascii() && test_proportion_block_caps() && test_handle_last_dot() && test_remove_all_but_last_dot() &&
+      (test_is_ascii() && test_contains_cjk() && test_proportion_block_caps() && test_handle_last_dot() &&
+       test_remove_all_but_last_dot() &&
        test_sanitise_core() && test_sanitise() && test_sanitise_dirname() && test_escape_for_shell() &&
        test_replace_substring() && test_nameset() && test_resolve_collision());
 

@@ -233,6 +233,98 @@ else
   pass
 fi
 
+# --- Test 17: stats mode — per-folder counts match a -r run inside the folder ---
+t="$TMPDIR_BASE/t17"
+mkdir -p "$t/Pod Casts/Nested Dir" "$t/clean_dir" "$t/node_modules/pkg"
+for i in $(seq 1 15); do touch "$t/Pod Casts/Episode $i!.mp3"; done
+touch "$t/Pod Casts/Nested Dir/Messy File.txt"
+touch "$t/clean_dir/already_fine.txt"
+touch "$t/node_modules/pkg/Messy File.js"
+touch "$t/Loose Top File.txt"
+out=$(run_in "$t" -s)
+# "Pod Casts": 15 episodes + 1 nested file + 1 dir rename = 17
+if ! echo "$out" | grep -q '^Pod Casts: 17 renames$'; then
+  fail "stats count wrong for Pod Casts" "Pod Casts: 17 renames" "$out"
+elif ! echo "$out" | grep -q '^clean_dir: 0 renames$'; then
+  fail "stats missing zero-rename folder" "clean_dir: 0 renames" "$out"
+elif echo "$out" | grep -q 'node_modules'; then
+  fail "stats mode processed excluded dir" "no node_modules in output" "$out"
+elif echo "$out" | grep -q 'Loose Top File'; then
+  fail "stats mode reported a top-level file" "folders only" "$out"
+else
+  pass
+fi
+
+# --- Test 18: stats mode — samples capped at 10 and drawn from the folder ---
+t="$TMPDIR_BASE/t18"
+mkdir -p "$t/Big Folder"
+for i in $(seq 1 30); do touch "$t/Big Folder/Messy File $i.txt"; done
+out=$(run_in "$t" -s)
+sample_lines=$(echo "$out" | grep -c '^  ')
+if [ "$sample_lines" -ne 10 ]; then
+  fail "stats sample not capped at 10" "10 sample lines" "$sample_lines"
+elif ! echo "$out" | grep -q '^  Big Folder/Messy File .* -> Big Folder/Messy_File_.*\.txt$'; then
+  fail "stats sample lines malformed" "old -> new with folder prefix" "$out"
+else
+  pass
+fi
+
+# --- Test 19: stats mode — fewer than 10 renames shows all of them ---
+t="$TMPDIR_BASE/t19"
+mkdir -p "$t/Small Folder"
+touch "$t/Small Folder/File One!.txt" "$t/Small Folder/File Two!.txt"
+out=$(run_in "$t" -s)
+sample_lines=$(echo "$out" | grep -c '^  ')
+if [ "$sample_lines" -eq 2 ] && echo "$out" | grep -q '^Small Folder: 2 renames$'; then
+  pass
+else
+  fail "stats with <10 renames wrong" "2 sample lines and count 2" "$out"
+fi
+
+# --- Test 20: Zone.Identifier artifacts are skipped entirely ---
+t="$TMPDIR_BASE/t20"
+mkdir -p "$t"
+touch "$t/report.pdf:Zone.Identifier"
+touch "$t/Some Doc.pdf:Zone.Identifier"
+touch "$t/Messy File.txt"
+out=$(run_in "$t")
+if echo "$out" | grep -q 'Zone.Identifier'; then
+  fail "Zone.Identifier file processed" "no Zone.Identifier in output" "$out"
+elif ! echo "$out" | grep -q 'Messy_File.txt'; then
+  fail "normal file not renamed alongside Zone.Identifier files" "Messy_File.txt rename" "$out"
+else
+  pass
+fi
+
+# --- Test 21: CJK names are left untouched (no rename, no collision warning) ---
+t="$TMPDIR_BASE/t21"
+mkdir -p "$t/中文 目录"
+touch "$t/数学分析教程-常庚哲_史济怀-下册-2003.pdf"
+touch "$t/中文 目录/Messy File.txt"
+out=$(run_in "$t" -r)
+if echo "$out" | grep -q '数学'; then
+  fail "CJK filename renamed" "no CJK mv lines" "$out"
+elif echo "$out" | grep -v 'Messy' | grep -q '中文'; then
+  fail "CJK dirname renamed" "no CJK dir mv line" "$out"
+elif ! echo "$out" | grep -q '中文 目录/Messy_File.txt'; then
+  fail "file inside CJK dir not renamed" "中文 目录/Messy_File.txt rename" "$out"
+else
+  pass
+fi
+
+# --- Test 22: uppercase camera files (.JPG/.HEIC) keep their names ---
+t="$TMPDIR_BASE/t22"
+mkdir -p "$t"
+touch "$t/IMG_E1692.JPG" "$t/DCCZ4920.JPG" "$t/IMG_0687.HEIC" "$t/HOLIDAY SCAN.PDF"
+out=$(run_in "$t")
+if echo "$out" | grep -q 'IMG\|DCCZ'; then
+  fail "camera file renamed" "no mv for camera files" "$out"
+elif ! echo "$out" | grep -q 'holiday_scan.pdf'; then
+  fail "non-camera caps file not lowercased" "holiday_scan.pdf rename" "$out"
+else
+  pass
+fi
+
 # --- Summary ---
 total=$((PASS + FAIL))
 printf "\n%d/%d integration tests passed\n" "$PASS" "$total"
